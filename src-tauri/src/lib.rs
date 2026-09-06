@@ -19,6 +19,36 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// A real window rather than a view inside the popover, so it stays open while
+/// you click elsewhere and the popover always returns to the usage list.
+#[tauri::command]
+fn open_settings(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return;
+    }
+
+    let built = tauri::WebviewWindowBuilder::new(&app, "settings", tauri::WebviewUrl::default())
+        .title("AI Usage Settings")
+        .inner_size(640.0, 460.0)
+        .min_inner_size(560.0, 400.0)
+        .resizable(true)
+        .build();
+
+    if let Ok(window) = built {
+        let _ = window.set_focus();
+    }
+
+    // An Accessory app gets no window focus by default, so the settings window
+    // would open behind whatever the user was in.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    }
+}
+
 #[tauri::command]
 fn resize_window(app: tauri::AppHandle, height: f64) {
     if let Some(window) = app.get_webview_window("main") {
@@ -40,6 +70,7 @@ pub fn run() {
             providers::clear_provider_key,
             update_tray,
             quit_app,
+            open_settings,
             resize_window
         ])
         .setup(|app| {
@@ -101,10 +132,20 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Focused(false) = event {
-                window.hide().unwrap();
+        .on_window_event(|window, event| match event {
+            // Only the popover dismisses itself; the settings window must survive
+            // the user clicking into another app.
+            tauri::WindowEvent::Focused(false) if window.label() == "main" => {
+                let _ = window.hide();
             }
+            // Closing settings drops the Dock icon that opening it required.
+            tauri::WindowEvent::CloseRequested { .. } if window.label() == "settings" => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

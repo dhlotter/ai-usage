@@ -1,0 +1,96 @@
+/* Settings window. The popover is transparent and vibrant; this is an ordinary
+   opaque window, so it sets its own background rather than inheriting App.css. */
+
+.settings-window {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 168px 1fr;
+  background: #1e1e1e;
+  color: var(--text);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 44px 10px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-right: 1px solid var(--separator);
+}
+
+.nav-item {
+  text-align: left;
+  font: inherit;
+  color: var(--text-2);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+.nav-item:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+.nav-item.active { background: var(--blue); color: #fff; }
+
+.settings-pane {
+  padding: 44px 22px 22px;
+  overflow-y: auto;
+}
+
+.pane-title {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pane-intro {
+  margin: 0 0 16px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.group {
+  margin-bottom: 18px;
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.group-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-3);
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--separator-2);
+}
+
+/* Stacked label plus explanatory line, so a row can teach without a tooltip. */
+.row-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.row-hint { font-size: 11px; color: var(--text-3); }
+.row-state { font-size: 11px; color: var(--text-3); }
+.row-state.ok { color: var(--green); }
+
+.provider-group .row { align-items: center; }
+
+.provider-help {
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 0 12px 10px 40px;
+  line-height: 1.45;
+}
+
+.quit-btn {
+  font: inherit;
+  font-size: 12px;
+  color: var(--red);
+  background: none;
+  border: 1px solid var(--separator);
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.quit-btn:hover { background: rgba(255, 69, 58, 0.1); }

@@ -1,111 +1,116 @@
-# AI Usage Monitor — macOS Menubar App
+# AI Usage
 
-A native macOS menubar app that shows real-time rate-limit status for your AI developer tools.
-Built with **Tauri 2 + React/TypeScript** (Rust backend, React/TS frontend).
+A small macOS menu bar app showing how much of your AI coding limits you have used.
+One icon, a percentage on hover, a click for the detail. Nothing else.
+
+Built with Tauri 2, a Rust backend and a React/TypeScript frontend.
 
 ---
 
 ## What it does
 
-- **Menubar tray icon** — click to toggle a popover panel positioned below the icon
-- **Per-provider cards** — usage bar, used %, live reset countdown, plan type
-- **Auth state handling** — dimmed cards with a clear message when a token is missing or expired
-- **macOS notifications** when a provider crosses your alert threshold
-- **Settings view** — provider toggles, menu-bar countdown source, alert threshold, refresh interval
-- Right-click tray menu → Open / Quit; hides on focus loss
+- **Menu bar icon** with every provider's usage in the hover tooltip, and an optional countdown next to it
+- **Click for a popover** with a bar per limit window, the used percentage, and a live reset countdown
+- **Settings window** with General and Providers sections
+- **Notifications** when a provider crosses a threshold you choose
+- **Launch at login**
+
+Usage is shown as **used**, not remaining, so the bar fills and turns red as you approach the limit.
 
 ---
 
 ## Providers
 
-| Provider | Data Source | Auth Method | Status |
+| Provider | Source | Credential | Windows shown |
 |---|---|---|---|
-| **Claude** | `api.anthropic.com/api/oauth/usage` | macOS Keychain (`Claude Code-credentials`) | ✅ Working |
-| **Codex (ChatGPT)** | `chatgpt.com/backend-api/wham/usage` | `~/.codex/auth.json` | ✅ Working |
-| **Antigravity** | — | Google OAuth (local encrypted storage) | 🔜 Placeholder |
+| **Claude Code** | `api.anthropic.com/api/oauth/usage` | Keychain item Claude Code wrote (`Claude Code-credentials`) | 5-hour, weekly |
+| **Codex** | `chatgpt.com/backend-api/wham/usage` | `~/.codex/auth.json` | 5-hour, weekly |
+| **GLM** | `api.z.ai/api/monitor/usage/quota/limit` | Your Z.ai API key, in Settings | 5-hour |
 
-No credentials ever touch the frontend: the Rust backend reads tokens directly.
+### Why the credentials differ
+
+These are not interchangeable auth methods, they are what each vendor allows.
+
+Claude and Codex expose subscription limits only to their own CLI's stored credential.
+Anthropic [banned third-party OAuth for subscription accounts in February 2026](https://alternativeto.net/news/2026/2/anthropic-officially-bans-using-subscription-authentication-for-third-party-claude-use),
+and its API keys report organisation spend in dollars, which is a different measurement
+entirely. So for those two, the app reads the credential the official CLI already stored.
+Install and sign into the CLI once and they work with no further setup.
+
+GLM is the opposite: ZCode's stored OAuth token is rejected by the quota endpoint, while a
+normal Z.ai API key works. So GLM takes a key, entered in Settings and stored in the
+Keychain as `ai-usage-glm`.
+
+Keys only ever travel inward. The app can store one and report whether one exists, but never
+reads a stored key back out to the frontend, and passes it to `security` over stdin rather
+than on the command line where it would appear in the process list.
+
+**These endpoints are undocumented.** They can change or be locked down without notice.
 
 ---
 
-## Tech Stack
+## Install
+
+Requires macOS 14 or later. Universal, both Apple Silicon and Intel.
+
+Download the `.dmg` from Releases, or build it yourself (below).
+
+The app is not signed with an Apple Developer ID, so the first launch needs
+right-click → Open rather than a double-click.
+
+---
+
+## Layout
 
 ```
 src/
-  main.tsx        Entry point
-  App.tsx         Main view + settings view (self-contained)
-  App.css         Dark-mode design system
+  main.tsx        Mounts App or Settings, chosen by window label
+  App.tsx         Popover: the usage list
+  Settings.tsx    Settings window: General and Providers
+  shared.tsx      Types, provider table, settings storage, shared controls
+  App.css         Palette and shared controls
+  Settings.css    Settings window layout
 
 src-tauri/src/
-  lib.rs          Tray icon, window positioning, vibrancy, auto-resize
-  providers.rs    get_providers command: HTTP fetches + in-process cache
+  lib.rs          Tray icon, popover positioning, settings window, autostart
+  providers.rs    Fetching, caching, and API key storage
 ```
 
-**Rust deps:** `tauri 2`, `tauri-plugin-notification`, `ureq`, `chrono`, `serde_json`, `dirs`
-**JS deps:** `@tauri-apps/api`, `@tauri-apps/plugin-notification`
+Both windows load the same bundle. `main.tsx` renders one or the other based on
+`getCurrentWindow().label`. They keep separate React state and stay in sync over a
+`settings-changed` Tauri event.
 
 ---
 
-## Dev Setup
+## Dev
 
 ```bash
-# 1. Install Rust (one-time)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-
-# 2. Install JS deps
 npm install
-
-# 3. Run with hot-reload
 npm run tauri dev
 ```
 
-If the build fails reading permission files from a path that doesn't exist,
-the project moved and `target/` holds stale absolute paths. Run `cargo clean` in `src-tauri/`.
-
-## Build release `.app`
+Run the tests:
 
 ```bash
-source "$HOME/.cargo/env"
-npm run tauri build
-# → src-tauri/target/release/bundle/macos/AI Usage.app
+cd src-tauri && cargo test
 ```
+
+Build a universal release:
+
+```bash
+rustup target add x86_64-apple-darwin
+npm run tauri build -- --target universal-apple-darwin
+```
+
+Output lands in `src-tauri/target/universal-apple-darwin/release/bundle/`.
 
 ---
 
-## Rust → Frontend data contract
+## Notes
 
-```typescript
-interface LimitBucket {
-  used_percent: number;         // 0–100+
-  resets_at_unix: number;       // epoch seconds
-  window_seconds: number;
-}
-
-interface ProviderUsage {
-  id: 'claude' | 'codex' | 'antigravity';
-  display_name: string;
-  short_label: string;
-  five_hour: LimitBucket | null;   // primary window
-  weekly: LimitBucket | null;      // secondary window
-  plan_type: string | null;        // "pro", "max5", "enterprise", ...
-  auth_state:
-    | 'ok'
-    | 'no_credentials'
-    | 'auth_failed'
-    | 'network_error'
-    | 'rate_limited'
-    | 'not_implemented';
-  auth_error: string | null;
-}
-
-interface ProvidersResponse {
-  providers: ProviderUsage[];
-  last_updated: string;           // HH:MM:SS
-  now_unix: number;
-}
-```
-
----
-
-See [PLAN.md](PLAN.md) for remaining tasks and roadmap.
+- Fetches run in parallel and start at launch rather than waiting for the webview,
+  so the popover has content by the time you click it.
+- Results are cached for 30s, with a 60s backoff on errors and a longer one when
+  rate limited. Saving or clearing an API key clears that provider's cache so a
+  correct key takes effect immediately.
+- The tray icon is a template image, so macOS tints it for light and dark menu bars.

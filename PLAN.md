@@ -1,53 +1,51 @@
-# AI Usage Monitor — Plan & Progress
+# Plan
 
-## Current state ✅
+What the README does not cover: what is left, and the decisions behind what is built.
 
-The unified data model shipped as a **self-contained `App.tsx`** (main view + settings view inline).
-The old multi-file frontend (`Dashboard.tsx`, `Settings.tsx`, `types.ts`, `store.ts`) was orphaned
-in the rewrite and has been deleted.
+## Left to do
 
-### Working today
-- [x] Tauri 2 menubar app (React/TS + Rust), Accessory activation policy, popover vibrancy
-- [x] Tray icon: click toggle, right-click menu (Open / Quit), hides on focus loss
-- [x] Window auto-resizes to content height (`resize_window` + ResizeObserver)
-- [x] Single Rust command `get_providers(enabled)` → `ProviderUsage[]` with in-process cache
-      (30s TTL, 60s error backoff, 120s rate-limit backoff)
-- [x] **Claude** — `api.anthropic.com/api/oauth/usage`, OAuth token from Keychain
-      (`Claude Code-credentials` service); 5-hour + weekly windows, plan type
-- [x] **Codex** — `chatgpt.com/backend-api/wham/usage`, token from `~/.codex/auth.json`;
-      primary + secondary windows, plan type
-- [x] Per-provider cards: progress bar, used %, live countdown ("resets in 2h 14m", 1s tick)
-- [x] Auth state rendering: not signed in / token expired / connection error / coming soon,
-      dimmed card + detail line
-- [x] Settings: provider toggles, menu-bar countdown source, alert threshold, refresh interval, Quit
-- [x] Notifications when a provider crosses the configured % of its 5-hour window
-      (deduped per reset window)
+### Before publishing
+- [ ] **Decide on signing.** Unsigned means right-click → Open on first launch. It is also a
+      real risk: an app that reads the Keychain, reads CLI auth files, and makes network calls
+      is the same profile as [RateLimited](https://github.com/max2697/RateLimited), which
+      XProtect deleted system-wide on this machine in September 2026. An Apple Developer
+      account ($99/yr) plus notarization removes both problems.
+- [ ] Public GitHub repo, push, tag a release with the universal `.dmg`
+- [ ] Homebrew tap (`dhlotter/homebrew-tap`) with a cask pointing at the release
+- [ ] LICENSE (MIT, if it is going out free)
 
-## Deliberately dropped (decide if wanted)
+### Nice to have
+- [ ] More providers. Each one needs its own answer to "what does this vendor actually expose",
+      not an assumption that it works like the last one.
+- [ ] GLM's daily MCP tool counter (`TIME_LIMIT`), deliberately left out for now
+- [ ] Tracking API spend in dollars, for people on API keys rather than subscriptions.
+      A different product from tracking subscription windows, worth not conflating.
 
-The lean rewrite is rate-limits only. These features from the first prototype have no backend anymore:
+## Decisions worth remembering
 
-- **Claude Code local spend** — the JSONL parser (`~/.claude/projects/**/*.jsonl`) that produced
-  today/month cost, token counts, cache hit rate, session count and the 7-day sparkline is gone.
-  If wanted, fold into `ProviderUsage` as optional cost fields (only the `claude` provider fills them).
-- **Cursor prorated budget** — manual monthly-cost estimate, no API.
-- **OpenAI platform API spend** — endpoint changed/dead even before the rewrite.
+**Used, not remaining.** ZCode and CodexBar both show "% left". This shows "% used" so the bar
+fills and reddens toward the limit. Consistent across every provider.
 
-## Remaining work 🔜
+**No CLI subprocesses.** CodexBar shells out to a real `claude` process per poll, which is why
+it idles around 5% CPU with a watchdog process. This reads the stored credential and makes one
+HTTPS call instead.
 
-### Polish
-- [ ] Real tray/menu bar icon (16×16 template PNG, dark-mode safe); currently default Tauri icon
-- [ ] Launch at login via `tauri-plugin-autostart`
-- [ ] Rename package from `tauri-app` to `ai-usage-monitor`
-- [ ] Git init + private remote when this graduates from testing
+**Deliberately not busy.** The reason this exists rather than using CodexBar: pace forecasting,
+deficit modelling, plan badges, cost tracking, reset credits and confetti are not settings you
+can turn off there, they are the product. Adding metrics here should clear a high bar.
 
-### Features
-- [ ] Antigravity — investigate local Google OAuth storage, then implement `fetch_antigravity()`
-- [ ] Optional: bring back Claude Code cost data (see above) as a secondary line on the Claude card
+**Auth is per vendor, not a user preference.** See the README. A "choose your auth method"
+setting would offer choices that mostly do not exist, and where they do, they silently change
+what is being measured.
 
-## Notes
+## Gotchas
 
-- Build cache gotcha: `target/` embeds absolute paths. If the project moves (e.g. old `/hub/...`
-  location), run `cargo clean` or the tauri build script fails reading permission files from the
-  stale path.
-- Keychain service names: Claude = `Claude Code-credentials`; Codex reads `~/.codex/auth.json`.
+- `target/` embeds absolute paths. If the project moves, `cargo clean` before building.
+- The Z.ai quota endpoint returns **HTTP 200 on auth failure**, with the real status in the
+  body as `code`/`success`. Check the body, not the status.
+- `security -w` with no value reads the password from stdin and asks for it twice. Undocumented,
+  so there is a test covering the round trip.
+- Do not add a `trayIcon` block to `tauri.conf.json`. Tauri auto-builds a second, click-inert
+  tray icon from it alongside the one built in `setup()`.
+- The focus-loss handler must stay scoped to the `main` window, or the settings window hides
+  itself the moment you click into another app.
