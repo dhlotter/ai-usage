@@ -17,9 +17,9 @@ I built it for myself and figured other people might want it too.
 established tool here, it is very good, and it covers 69 providers. If you want
 breadth, use that one: `brew install --cask steipete/tap/codexbar`.
 
-I found it busier than I needed. I use three tools, so this shows three: **Claude
-Code**, **Codex**, and **GLM** through ZCode. One icon, three bars, no settings I
-have to think about. If that is your setup too, you are welcome to it.
+I found it busier than I needed. This one supports three: **Claude Code**,
+**Codex**, and **GLM** through ZCode. Each can be switched on or off in Settings,
+so you see only the ones you use. If that is your setup too, you are welcome to it.
 
 ---
 
@@ -27,7 +27,7 @@ have to think about. If that is your setup too, you are welcome to it.
 
 - **Menu bar icon** with every provider's usage in the hover tooltip, and an optional countdown next to it
 - **Click for a popover** with a bar per limit window, the used percentage, and a live reset countdown
-- **Settings window** with General and Providers sections
+- **Settings window** where each of the three providers can be switched on or off, plus general options
 - **Notifications** when a provider crosses a threshold you choose
 - **Launch at login**
 
