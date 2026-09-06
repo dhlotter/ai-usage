@@ -136,6 +136,25 @@ export function fmtCountdown(secsRemaining: number): string {
   return `${m}m`;
 }
 
+/// The window closest to its limit, which is the one that will actually stop you
+/// working. Headline number, tray tooltip and alerts all read from here.
+///
+/// Showing the 5-hour figure alone used to hide the window that matters: a
+/// weekly limit at 100% with three days left on the clock rendered as "0%"
+/// beside a full red bar, and never raised an alert. A 5-hour window resets
+/// while you make coffee; a weekly one ends your week.
+export function worstWindow(p: ProviderUsage): { pct: number; label: string; resets_at_unix: number } | null {
+  const windows: { pct: number; label: string; resets_at_unix: number }[] = [];
+  if (p.five_hour) windows.push({ pct: p.five_hour.used_percent, label: '5-hour', resets_at_unix: p.five_hour.resets_at_unix });
+  if (p.weekly) windows.push({ pct: p.weekly.used_percent, label: 'weekly', resets_at_unix: p.weekly.resets_at_unix });
+  if (p.extra) windows.push({ pct: p.extra.used_percent, label: p.extra_label ?? 'extra', resets_at_unix: p.extra.resets_at_unix });
+
+  return windows.reduce<{ pct: number; label: string; resets_at_unix: number } | null>(
+    (worst, w) => (worst === null || w.pct > worst.pct ? w : worst),
+    null,
+  );
+}
+
 export function barColor(pct: number): string {
   if (pct >= 90) return 'var(--red)';
   if (pct >= 75) return 'var(--yellow)';

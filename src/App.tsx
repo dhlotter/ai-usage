@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import {
   AUTH_MESSAGES, DANGER_RGB, NEUTRAL_RGB, PROVIDER_META, ProviderUsage, ProvidersResponse, Settings,
-  barColor, fmtCountdown, loadSettings, pctTextColor, useSettingsSync,
+  barColor, fmtCountdown, loadSettings, pctTextColor, useSettingsSync, worstWindow,
 } from './shared';
 import './App.css';
 
@@ -95,8 +95,10 @@ export default function App() {
   // Update tray — title shows the chosen countdown, tooltip always lists every enabled provider's %
   useEffect(() => {
     const tooltip = (data?.providers ?? [])
-      .filter(p => settings.enabled[p.id] && p.auth_state === 'ok' && p.five_hour)
-      .map(p => `${p.short_label} ${Math.round(p.five_hour!.used_percent)}%`)
+      .filter(p => settings.enabled[p.id] && p.auth_state === 'ok')
+      .map(p => ({ p, w: worstWindow(p) }))
+      .filter(({ w }) => w !== null)
+      .map(({ p, w }) => `${p.short_label} ${Math.round(w!.pct)}%`)
       .join(' · ') || 'AI Usage';
 
     if (!trayProv?.five_hour) {
@@ -109,15 +111,18 @@ export default function App() {
     // Notifications
     if (settings.notificationsEnabled) {
       for (const p of data?.providers ?? []) {
-        if (p.auth_state !== 'ok' || !p.five_hour) continue;
-        const key = `${p.id}-${p.five_hour.resets_at_unix}-${settings.alertPct}`;
-        if (p.five_hour.used_percent >= settings.alertPct && !notifiedRef.current.has(key)) {
+        if (p.auth_state !== 'ok') continue;
+        const w = worstWindow(p);
+        if (!w) continue;
+        // Keyed on the window's own reset so a fresh window can alert again.
+        const key = `${p.id}-${w.label}-${w.resets_at_unix}-${settings.alertPct}`;
+        if (w.pct >= settings.alertPct && !notifiedRef.current.has(key)) {
           notifiedRef.current.add(key);
           (async () => {
             const ok = await isPermissionGranted() || (await requestPermission()) === 'granted';
             if (ok) sendNotification({
               title: `${p.display_name}: usage alert`,
-              body: `${Math.round(p.five_hour!.used_percent)}% of 5-hour limit used`,
+              body: `${Math.round(w.pct)}% of ${w.label} limit used`,
             });
           })();
         }
@@ -162,8 +167,11 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
   const wkPct = wk?.used_percent ?? 0;
 
   // Brand hue normally, warning hue once a limit is nearly spent, so the wash
-  // never competes with the colour that carries the actual signal.
-  const peak = Math.max(fhPct, wkPct);
+  // never competes with the colour that carries the actual signal. The wash and
+  // the headline read the same number, which they did not before: the card went
+  // red off the peak while the headline still showed the 5-hour figure.
+  const worst = worstWindow(p);
+  const peak = worst?.pct ?? 0;
   const rgb = p.auth_state !== 'ok' ? NEUTRAL_RGB
     : peak >= 90 ? DANGER_RGB
     : meta.rgb;
@@ -195,7 +203,7 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
         <span className="provider-icon" style={{ background: meta.tint }}>{meta.icon}</span>
         <span className="provider-name">{p.display_name}</span>
         {p.plan_type && <span className="provider-plan">{p.plan_type}</span>}
-        {fh && <span className="provider-pct" style={{ color: pctTextColor(fhPct) }}>{Math.round(fhPct)}%</span>}
+        {worst && <span className="provider-pct" style={{ color: pctTextColor(worst.pct) }}>{Math.round(worst.pct)}%</span>}
       </div>
       {fh && (
         <div className="provider-window">
