@@ -14,6 +14,7 @@ interface ProviderUsage {
   plan_type: string | null;
   auth_state: 'ok' | 'no_credentials' | 'auth_failed' | 'network_error' | 'not_implemented' | 'rate_limited';
   auth_error: string | null;
+  accepts_key: boolean;
 }
 interface ProvidersResponse {
   providers: ProviderUsage[];
@@ -186,6 +187,8 @@ export default function App() {
       { id: 'codex', name: 'Codex' },
       { id: 'glm', name: 'GLM' },
     ];
+    // Only providers whose vendor lets a user-supplied key read plan usage.
+    const keyProviders = new Set<string>((data?.providers ?? []).filter(p => p.accepts_key).map(p => p.id));
     return (
       <div className="app" ref={rootRef}>
         <div className="titlebar">
@@ -201,13 +204,16 @@ export default function App() {
         <div className="section">
           <div className="section-label">Providers</div>
           {providerList.map(({ id, name }) => (
-            <div key={id} className="row">
-              <span className="row-icon" style={{ background: PROVIDER_META[id].tint }}>{PROVIDER_META[id].icon}</span>
-              <span className="row-label">{name}</span>
-              <Toggle
-                value={draft.enabled[id] ?? false}
-                onChange={v => setDraft(d => ({ ...d, enabled: { ...d.enabled, [id]: v } }))}
-              />
+            <div key={id}>
+              <div className="row">
+                <span className="row-icon" style={{ background: PROVIDER_META[id].tint }}>{PROVIDER_META[id].icon}</span>
+                <span className="row-label">{name}</span>
+                <Toggle
+                  value={draft.enabled[id] ?? false}
+                  onChange={v => setDraft(d => ({ ...d, enabled: { ...d.enabled, [id]: v } }))}
+                />
+              </div>
+              {keyProviders.has(id) && draft.enabled[id] && <ApiKeyRow provider={id} onSaved={refresh} />}
             </div>
           ))}
         </div>
@@ -365,6 +371,64 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/// Write-only: a stored key is never read back into the frontend, the backend
+/// only reports whether one exists.
+function ApiKeyRow({ provider, onSaved }: { provider: string; onSaved: () => void }) {
+  const [stored, setStored] = useState<boolean | null>(null);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<boolean>('has_provider_key', { provider }).then(setStored).catch(() => setStored(false));
+  }, [provider]);
+
+  const save = async () => {
+    setBusy(true); setError(null);
+    try {
+      await invoke('set_provider_key', { provider, key: value });
+      setValue(''); setStored(true); onSaved();
+    } catch (e) { setError(String(e)); }
+    setBusy(false);
+  };
+
+  const remove = async () => {
+    setBusy(true); setError(null);
+    try {
+      await invoke('clear_provider_key', { provider });
+      setStored(false); onSaved();
+    } catch (e) { setError(String(e)); }
+    setBusy(false);
+  };
+
+  if (stored === null) return null;
+
+  return (
+    <div className="key-row">
+      {stored ? (
+        <>
+          <span className="key-status">API key saved</span>
+          <button className="key-btn" onClick={remove} disabled={busy}>Remove</button>
+        </>
+      ) : (
+        <>
+          <input
+            className="key-input"
+            type="password"
+            placeholder="Paste API key"
+            value={value}
+            spellCheck={false}
+            onChange={e => setValue(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && value.trim() && !busy) save(); }}
+          />
+          <button className="key-btn" onClick={save} disabled={busy || !value.trim()}>Save</button>
+        </>
+      )}
+      {error && <div className="key-error">{error}</div>}
     </div>
   );
 }

@@ -2,7 +2,8 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 const USER_AGENT: &str = "ai-usage-monitor/0.1";
@@ -35,6 +36,13 @@ fn put_cache(id: &str, result: ProviderUsage, ttl_secs: i64) {
     }
 }
 
+/// Drop a cached result so the next fetch retries immediately. Without this a
+/// failed auth sits behind ERROR_BACKOFF_SECS, and saving a key looks like it
+/// did nothing for a minute.
+fn invalidate(id: &str) {
+    if let Ok(mut map) = cache().lock() { map.remove(id); }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct LimitBucket {
     pub used_percent: f64,
@@ -53,6 +61,9 @@ pub struct ProviderUsage {
     /// "ok" | "no_credentials" | "auth_failed" | "network_error" | "not_implemented"
     pub auth_state: String,
     pub auth_error: Option<String>,
+    /// Whether this provider can be authenticated with a user-supplied API key.
+    /// False where the vendor exposes plan usage only to its own CLI's credential.
+    pub accepts_key: bool,
 }
 
 // ── Claude ──────────────────────────────────────────────────────────
@@ -224,7 +235,6 @@ fn fetch_codex() -> ProviderUsage {
 // ── GLM (Z.ai coding plan) ──────────────────────────────────────────
 
 const GLM_QUOTA: &str = "https://api.z.ai/api/monitor/usage/quota/limit";
-const GLM_KEYCHAIN_SERVICE: &str = "ai-usage-zai";
 
 /// Z.ai returns HTTP 200 even for auth failures, with the real status in the
 /// body as `code` / `success`, so the body has to be checked, not just the status.
@@ -236,11 +246,12 @@ fn fetch_glm() -> ProviderUsage {
         display_name: "GLM".into(),
         short_label: "GLM".into(),
         auth_state: "no_credentials".into(),
+        accepts_key: true,
         ..Default::default()
     };
 
     // Keychain first (survives a GUI launch at login), env var as a dev fallback.
-    let token = match read_keychain(GLM_KEYCHAIN_SERVICE).ok().or_else(|| std::env::var("ZAI_API_KEY").ok()) {
+    let token = match read_keychain(&keychain_service("glm")).ok().or_else(|| std::env::var("ZAI_API_KEY").ok()) {
         Some(t) if !t.is_empty() => t,
         _ => { put_cache("glm", u.clone(), ERROR_BACKOFF_SECS); return u; }
     };
@@ -271,7 +282,7 @@ fn fetch_glm() -> ProviderUsage {
         let code = body["code"].as_i64().unwrap_or(0);
         let msg = body["msg"].as_str().unwrap_or("unknown error");
         u.auth_state = if code == 401 { "auth_failed".into() } else { "network_error".into() };
-        u.auth_error = Some(if code == 401 { format!("{msg} — update the {GLM_KEYCHAIN_SERVICE} keychain item") } else { msg.to_string() });
+        u.auth_error = Some(if code == 401 { format!("{msg} — check the API key in Settings") } else { msg.to_string() });
         put_cache("glm", u.clone(), ERROR_BACKOFF_SECS);
         return u;
     }
@@ -295,6 +306,84 @@ fn fetch_glm() -> ProviderUsage {
     }
     put_cache("glm", u.clone(), MIN_FETCH_INTERVAL_SECS);
     u
+}
+
+// ── API key storage ─────────────────────────────────────────────────
+
+fn keychain_service(provider: &str) -> String {
+    format!("ai-usage-{provider}")
+}
+
+/// Whether a key is stored, never the key itself: secrets only travel inward.
+#[tauri::command]
+pub fn has_provider_key(provider: String) -> bool {
+    read_keychain(&keychain_service(&provider)).map(|k| !k.is_empty()).unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn set_provider_key(provider: String, key: String) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if key.is_empty() { return Err("key is empty".into()); }
+
+    let service = keychain_service(&provider);
+    let account = std::env::var("USER").unwrap_or_else(|_| "ai-usage".into());
+
+    // `-w` with no value reads the password from stdin (asked twice), which keeps
+    // the key out of the process list where `-w <key>` would expose it.
+    let mut child = Command::new("security")
+        .args(["add-generic-password", "-U", "-a", &account, "-s", &service, "-w"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("security: {e}"))?;
+
+    child.stdin.as_mut().ok_or("no stdin")?
+        .write_all(format!("{key}\n{key}\n").as_bytes())
+        .map_err(|e| format!("write key: {e}"))?;
+
+    let status = child.wait().map_err(|e| format!("security: {e}"))?;
+    if !status.success() { return Err("could not write to the keychain".into()); }
+
+    invalidate(&provider);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_provider_key(provider: String) -> Result<(), String> {
+    let service = keychain_service(&provider);
+    let out = Command::new("security")
+        .args(["delete-generic-password", "-s", &service])
+        .output()
+        .map_err(|e| format!("security: {e}"))?;
+    if !out.status.success() { return Err("no key to remove".into()); }
+    invalidate(&provider);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keychain_service_is_namespaced() {
+        assert_eq!(keychain_service("glm"), "ai-usage-glm");
+    }
+
+    /// `security -w` reading the value twice from stdin is undocumented, and a
+    /// silent change there would break key saving with no compile error.
+    #[test]
+    fn key_round_trips_through_the_keychain() {
+        let provider = format!("selftest-{}", std::process::id());
+        let secret = "round-trip-canary";
+
+        set_provider_key(provider.clone(), secret.into()).expect("write key");
+        assert!(has_provider_key(provider.clone()), "key should be stored");
+        assert_eq!(read_keychain(&keychain_service(&provider)).unwrap(), secret);
+
+        clear_provider_key(provider.clone()).expect("remove key");
+        assert!(!has_provider_key(provider), "key should be gone");
+    }
 }
 
 // ── Public command ──────────────────────────────────────────────────
