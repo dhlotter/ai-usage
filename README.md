@@ -11,15 +11,17 @@ One icon, a percentage on hover, a click for the detail. Nothing else.
 
 ## Why this exists
 
-I built it for myself and figured other people might want it too.
+I was building this for myself when Peter Steinberger released
+[CodexBar](https://github.com/steipete/CodexBar), which does far more: 69
+providers, a bundled CLI, the lot. It is genuinely good and if you want breadth
+you should use it: `brew install --cask steipete/tap/codexbar`.
 
-[CodexBar](https://github.com/steipete/CodexBar) by Peter Steinberger is the
-established tool here, it is very good, and it covers 69 providers. If you want
-breadth, use that one: `brew install --cask steipete/tap/codexbar`.
+I tried it and it was busier than I wanted, so I carried on with mine. This
+supports three: **Claude Code**, **Codex**, and **GLM** through ZCode, each
+toggled on or off in Settings, so you see only the ones you use. Nothing else.
 
-I found it busier than I needed. This one supports three: **Claude Code**,
-**Codex**, and **GLM** through ZCode. Each can be switched on or off in Settings,
-so you see only the ones you use. If that is your setup too, you are welcome to it.
+I have been running it daily since. Putting it up in case someone wants the
+smaller version.
 
 ---
 
