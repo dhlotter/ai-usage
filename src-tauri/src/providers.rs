@@ -7,9 +7,15 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 const USER_AGENT: &str = "ai-usage-monitor/0.1";
-const MIN_FETCH_INTERVAL_SECS: i64 = 30;
+/// Bounds the request rate for every caller at once. Two windows polling
+/// independently is what makes this the right place for the limit rather than
+/// each poller's interval, and a 5-hour window does not move fast enough to
+/// justify anything tighter.
+const MIN_FETCH_INTERVAL_SECS: i64 = 60;
 const ERROR_BACKOFF_SECS: i64 = 60;
 const RATE_LIMITED_BACKOFF_SECS: i64 = 120;
+/// However long a server asks us to wait, stop hiding the numbers after this.
+const MAX_BACKOFF_SECS: i64 = 600;
 
 #[derive(Clone)]
 struct Cached {
@@ -41,6 +47,39 @@ fn put_cache(id: &str, result: ProviderUsage, ttl_secs: i64) {
 /// did nothing for a minute.
 fn invalidate(id: &str) {
     if let Ok(mut map) = cache().lock() { map.remove(id); }
+    if let Ok(mut map) = last_good().lock() { map.remove(id); }
+}
+
+/// The most recent successful reading, kept separately from the TTL cache.
+fn last_good() -> &'static Mutex<HashMap<String, ProviderUsage>> {
+    static G: OnceLock<Mutex<HashMap<String, ProviderUsage>>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn put_good(id: &str, result: ProviderUsage) {
+    if let Ok(mut map) = last_good().lock() {
+        map.insert(id.to_string(), result);
+    }
+}
+
+/// A rate limit or a dropped connection says nothing about the numbers we
+/// already have, so keep showing the last good reading instead of replacing it
+/// with an error. Only failures the user must act on (missing or rejected
+/// credentials) are allowed to blank the card.
+fn degrade(id: &str, failure: ProviderUsage, backoff_secs: i64) -> ProviderUsage {
+    let backoff = backoff_secs.clamp(1, MAX_BACKOFF_SECS);
+    let transient = matches!(failure.auth_state.as_str(), "rate_limited" | "network_error");
+
+    if transient {
+        if let Ok(map) = last_good().lock() {
+            if let Some(good) = map.get(id).cloned() {
+                put_cache(id, good.clone(), backoff);
+                return good;
+            }
+        }
+    }
+    put_cache(id, failure.clone(), backoff);
+    failure
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -99,15 +138,15 @@ fn fetch_claude() -> ProviderUsage {
 
     let raw = match read_keychain("Claude Code-credentials") {
         Ok(s) => s,
-        Err(_) => { put_cache("claude", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(_) => { return degrade("claude", u, ERROR_BACKOFF_SECS); }
     };
     let kc: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(e) => { u.auth_state = "auth_failed".into(); u.auth_error = Some(format!("parse keychain: {e}")); put_cache("claude", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(e) => { u.auth_state = "auth_failed".into(); u.auth_error = Some(format!("parse keychain: {e}")); return degrade("claude", u, ERROR_BACKOFF_SECS); }
     };
     let token = match kc["claudeAiOauth"]["accessToken"].as_str() {
         Some(t) => t.to_string(),
-        None => { u.auth_state = "auth_failed".into(); u.auth_error = Some("no access token".into()); put_cache("claude", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        None => { u.auth_state = "auth_failed".into(); u.auth_error = Some("no access token".into()); return degrade("claude", u, ERROR_BACKOFF_SECS); }
     };
 
     let resp = ureq::get(CLAUDE_USAGE)
@@ -119,17 +158,16 @@ fn fetch_claude() -> ProviderUsage {
     let body: Value = match resp {
         Ok(r) => match r.into_json() {
             Ok(v) => v,
-            Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(format!("json: {e}")); put_cache("claude", u.clone(), ERROR_BACKOFF_SECS); return u; }
+            Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(format!("json: {e}")); return degrade("claude", u, ERROR_BACKOFF_SECS); }
         },
-        Err(ureq::Error::Status(401, _)) => { u.auth_state = "auth_failed".into(); u.auth_error = Some("401 — run `claude` to refresh".into()); put_cache("claude", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(ureq::Error::Status(401, _)) => { u.auth_state = "auth_failed".into(); u.auth_error = Some("401 — run `claude` to refresh".into()); return degrade("claude", u, ERROR_BACKOFF_SECS); }
         Err(ureq::Error::Status(429, r)) => {
             let retry = r.header("retry-after").and_then(|s| s.parse::<i64>().ok()).unwrap_or(RATE_LIMITED_BACKOFF_SECS);
             u.auth_state = "rate_limited".into();
             u.auth_error = Some(format!("rate limited — retrying in {retry}s"));
-            put_cache("claude", u.clone(), retry);
-            return u;
+            return degrade("claude", u, retry);
         }
-        Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(e.to_string()); put_cache("claude", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(e.to_string()); return degrade("claude", u, ERROR_BACKOFF_SECS); }
     };
 
     u.auth_state = "ok".into();
@@ -153,6 +191,7 @@ fn fetch_claude() -> ProviderUsage {
             });
         }
     }
+    put_good("claude", u.clone());
     put_cache("claude", u.clone(), MIN_FETCH_INTERVAL_SECS);
     u
 }
@@ -172,19 +211,19 @@ fn fetch_codex() -> ProviderUsage {
         ..Default::default()
     };
 
-    let home = match dirs::home_dir() { Some(h) => h, None => { put_cache("codex", u.clone(), ERROR_BACKOFF_SECS); return u; } };
+    let home = match dirs::home_dir() { Some(h) => h, None => { return degrade("codex", u, ERROR_BACKOFF_SECS); } };
     let path = home.join(".codex/auth.json");
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => { put_cache("codex", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(_) => { return degrade("codex", u, ERROR_BACKOFF_SECS); }
     };
     let auth: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(e) => { u.auth_state = "auth_failed".into(); u.auth_error = Some(format!("parse auth.json: {e}")); put_cache("codex", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(e) => { u.auth_state = "auth_failed".into(); u.auth_error = Some(format!("parse auth.json: {e}")); return degrade("codex", u, ERROR_BACKOFF_SECS); }
     };
     let token = match auth["tokens"]["access_token"].as_str() {
         Some(t) => t.to_string(),
-        None => { u.auth_state = "auth_failed".into(); u.auth_error = Some("no access token".into()); put_cache("codex", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        None => { u.auth_state = "auth_failed".into(); u.auth_error = Some("no access token".into()); return degrade("codex", u, ERROR_BACKOFF_SECS); }
     };
     let account_id = auth["tokens"]["account_id"].as_str().unwrap_or("").to_string();
 
@@ -197,17 +236,16 @@ fn fetch_codex() -> ProviderUsage {
     let body: Value = match resp {
         Ok(r) => match r.into_json() {
             Ok(v) => v,
-            Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(format!("json: {e}")); put_cache("codex", u.clone(), ERROR_BACKOFF_SECS); return u; }
+            Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(format!("json: {e}")); return degrade("codex", u, ERROR_BACKOFF_SECS); }
         },
-        Err(ureq::Error::Status(401, _)) => { u.auth_state = "auth_failed".into(); u.auth_error = Some("401 — run `codex` to refresh".into()); put_cache("codex", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(ureq::Error::Status(401, _)) => { u.auth_state = "auth_failed".into(); u.auth_error = Some("401 — run `codex` to refresh".into()); return degrade("codex", u, ERROR_BACKOFF_SECS); }
         Err(ureq::Error::Status(429, r)) => {
             let retry = r.header("retry-after").and_then(|s| s.parse::<i64>().ok()).unwrap_or(RATE_LIMITED_BACKOFF_SECS);
             u.auth_state = "rate_limited".into();
             u.auth_error = Some(format!("rate limited — retrying in {retry}s"));
-            put_cache("codex", u.clone(), retry);
-            return u;
+            return degrade("codex", u, retry);
         }
-        Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(e.to_string()); put_cache("codex", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(e.to_string()); return degrade("codex", u, ERROR_BACKOFF_SECS); }
     };
 
     u.auth_state = "ok".into();
@@ -228,6 +266,7 @@ fn fetch_codex() -> ProviderUsage {
             window_seconds: rl["secondary_window"]["limit_window_seconds"].as_i64().unwrap_or(7 * 24 * 3600),
         });
     }
+    put_good("codex", u.clone());
     put_cache("codex", u.clone(), MIN_FETCH_INTERVAL_SECS);
     u
 }
@@ -253,7 +292,7 @@ fn fetch_glm() -> ProviderUsage {
     // Keychain first (survives a GUI launch at login), env var as a dev fallback.
     let token = match read_keychain(&keychain_service("glm")).ok().or_else(|| std::env::var("ZAI_API_KEY").ok()) {
         Some(t) if !t.is_empty() => t,
-        _ => { put_cache("glm", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        _ => { return degrade("glm", u, ERROR_BACKOFF_SECS); }
     };
 
     let resp = ureq::get(GLM_QUOTA)
@@ -266,16 +305,15 @@ fn fetch_glm() -> ProviderUsage {
     let body: Value = match resp {
         Ok(r) => match r.into_json() {
             Ok(v) => v,
-            Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(format!("json: {e}")); put_cache("glm", u.clone(), ERROR_BACKOFF_SECS); return u; }
+            Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(format!("json: {e}")); return degrade("glm", u, ERROR_BACKOFF_SECS); }
         },
         Err(ureq::Error::Status(429, r)) => {
             let retry = r.header("retry-after").and_then(|s| s.parse::<i64>().ok()).unwrap_or(RATE_LIMITED_BACKOFF_SECS);
             u.auth_state = "rate_limited".into();
             u.auth_error = Some(format!("rate limited — retrying in {retry}s"));
-            put_cache("glm", u.clone(), retry);
-            return u;
+            return degrade("glm", u, retry);
         }
-        Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(e.to_string()); put_cache("glm", u.clone(), ERROR_BACKOFF_SECS); return u; }
+        Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(e.to_string()); return degrade("glm", u, ERROR_BACKOFF_SECS); }
     };
 
     if body["success"].as_bool() != Some(true) {
@@ -283,8 +321,7 @@ fn fetch_glm() -> ProviderUsage {
         let msg = body["msg"].as_str().unwrap_or("unknown error");
         u.auth_state = if code == 401 { "auth_failed".into() } else { "network_error".into() };
         u.auth_error = Some(if code == 401 { format!("{msg} — check the API key in Settings") } else { msg.to_string() });
-        put_cache("glm", u.clone(), ERROR_BACKOFF_SECS);
-        return u;
+        return degrade("glm", u, ERROR_BACKOFF_SECS);
     }
 
     u.auth_state = "ok".into();
@@ -304,6 +341,7 @@ fn fetch_glm() -> ProviderUsage {
             }
         }
     }
+    put_good("glm", u.clone());
     put_cache("glm", u.clone(), MIN_FETCH_INTERVAL_SECS);
     u
 }
@@ -368,6 +406,61 @@ mod tests {
     #[test]
     fn keychain_service_is_namespaced() {
         assert_eq!(keychain_service("glm"), "ai-usage-glm");
+    }
+
+    fn usage(id: &str, state: &str, pct: f64) -> ProviderUsage {
+        ProviderUsage {
+            id: id.into(),
+            auth_state: state.into(),
+            five_hour: Some(LimitBucket { used_percent: pct, resets_at_unix: 0, window_seconds: 0 }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn transient_failure_keeps_the_last_good_reading() {
+        let id = "test-transient";
+        put_good(id, usage(id, "ok", 42.0));
+
+        let shown = degrade(id, usage(id, "rate_limited", 0.0), 60);
+
+        assert_eq!(shown.auth_state, "ok", "a rate limit should not blank a good reading");
+        assert_eq!(shown.five_hour.unwrap().used_percent, 42.0);
+        invalidate(id);
+    }
+
+    #[test]
+    fn auth_failure_is_shown_even_with_a_good_reading() {
+        let id = "test-auth";
+        put_good(id, usage(id, "ok", 42.0));
+
+        let shown = degrade(id, usage(id, "auth_failed", 0.0), 60);
+
+        assert_eq!(shown.auth_state, "auth_failed", "the user has to act on this one");
+        invalidate(id);
+    }
+
+    #[test]
+    fn transient_failure_with_no_history_still_reports() {
+        let id = "test-cold";
+        invalidate(id);
+
+        let shown = degrade(id, usage(id, "network_error", 0.0), 60);
+
+        assert_eq!(shown.auth_state, "network_error");
+        invalidate(id);
+    }
+
+    #[test]
+    fn backoff_is_capped() {
+        let id = "test-backoff";
+        invalidate(id);
+        degrade(id, usage(id, "rate_limited", 0.0), 86_400);
+
+        // Cached, not stuck for a day: still valid now, expired past the cap.
+        let map = cache().lock().unwrap();
+        let valid_until = map.get(id).unwrap().valid_until_unix;
+        assert!(valid_until <= Local::now().timestamp() + MAX_BACKOFF_SECS);
     }
 
     /// `security -w` reading the value twice from stdin is undocumented, and a

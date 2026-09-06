@@ -34,7 +34,13 @@ export default function SettingsWindow() {
     catch (e) { console.error(e); }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // Kept live while open: fetched only on mount, a transient error caught at
+  // that moment would sit here looking permanent.
+  useEffect(() => {
+    refresh();
+    const iv = setInterval(refresh, settings.refreshSecs * 1000);
+    return () => clearInterval(iv);
+  }, [refresh, settings.refreshSecs]);
 
   return (
     <div className="settings-window">
