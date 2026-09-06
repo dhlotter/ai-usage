@@ -65,6 +65,7 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .invoke_handler(tauri::generate_handler![
             providers::get_providers,
+            providers::get_cached_providers,
             providers::has_provider_key,
             providers::set_provider_key,
             providers::clear_provider_key,

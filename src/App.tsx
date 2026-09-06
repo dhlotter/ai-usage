@@ -13,6 +13,7 @@ export default function App() {
   const [, tick] = useState(0);
   const notifiedRef = useRef<Set<string>>(new Set());
   const rootRef = useRef<HTMLDivElement>(null);
+  const liveLandedRef = useRef(false);
 
   useSettingsSync(setSettings);
 
@@ -43,8 +44,39 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     const enabled = Object.entries(settings.enabled).filter(([, v]) => v).map(([k]) => k);
-    try { setData(await invoke<ProvidersResponse>('get_providers', { enabled })); }
+    try {
+      setData(await invoke<ProvidersResponse>('get_providers', { enabled }));
+      liveLandedRef.current = true;
+    }
     catch (e) { console.error(e); }
+  }, [settings.enabled]);
+
+  // Fill the popover from the Rust-side cache until the live fetch lands.
+  //
+  // get_providers only returns once the SLOWEST provider is done, so a cold
+  // open sat on "Loading..." for that whole time. Each fetch_* writes its own
+  // put_cache entry as it finishes, though, so reading the cache on a short
+  // interval fills the rows in one by one instead of all at once at the end.
+  // Costs one lock-and-clone per tick and no network.
+  useEffect(() => {
+    if (liveLandedRef.current) return;
+    let cancelled = false;
+    const enabled = Object.entries(settings.enabled).filter(([, v]) => v).map(([k]) => k);
+
+    const pull = async () => {
+      if (cancelled || liveLandedRef.current) return;
+      try {
+        const cached = await invoke<ProvidersResponse>('get_cached_providers', { enabled });
+        if (!cancelled && !liveLandedRef.current && cached.providers.length > 0) setData(cached);
+      } catch { /* cache read is best effort */ }
+    };
+
+    pull();
+    const iv = setInterval(() => {
+      if (liveLandedRef.current) { clearInterval(iv); return; }
+      pull();
+    }, 250);
+    return () => { cancelled = true; clearInterval(iv); };
   }, [settings.enabled]);
 
   useEffect(() => {

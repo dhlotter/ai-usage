@@ -445,6 +445,27 @@ mod tests {
     }
 
     #[test]
+    fn cached_read_falls_back_to_last_good_and_skips_the_unknown() {
+        // Uses the real provider ids because get_cached_providers only looks at
+        // those three. Cleaned up at the end so the other tests are unaffected.
+        invalidate("claude");
+        invalidate("codex");
+        put_good("claude", usage("claude", "ok", 42.0));
+
+        let res = get_cached_providers(vec!["claude".into(), "codex".into()]);
+
+        assert_eq!(res.providers.len(), 1, "codex has nothing known, so it is omitted rather than faked");
+        assert_eq!(res.providers[0].id, "claude");
+        assert_eq!(
+            res.providers[0].five_hour.as_ref().unwrap().used_percent,
+            42.0,
+            "an expired TTL cache should still paint from the last good reading"
+        );
+
+        invalidate("claude");
+    }
+
+    #[test]
     fn auth_failure_is_shown_even_with_a_good_reading() {
         let id = "test-auth";
         put_good(id, usage(id, "ok", 42.0));
@@ -538,6 +559,38 @@ pub fn get_providers(enabled: Vec<String>) -> ProvidersResponse {
     if want("glm") { handles.push(std::thread::spawn(fetch_glm)); }
 
     let providers: Vec<ProviderUsage> = handles.into_iter().filter_map(|h| h.join().ok()).collect();
+
+    let now = Local::now();
+    ProvidersResponse {
+        providers,
+        last_updated: now.format("%H:%M:%S").to_string(),
+        now_unix: now.timestamp(),
+    }
+}
+
+/// Whatever is already known for these providers, with no network access.
+///
+/// The popover calls this first so it can paint immediately. `get_providers`
+/// joins a thread per provider and returns once, after the SLOWEST one, so on a
+/// cold open the whole popover sat on "Loading..." for as long as the worst
+/// provider took. The numbers are usually already sitting in memory by then,
+/// put there by `warm_cache` at launch, they just had no way to reach the UI.
+///
+/// Falls back to `last_good` when the TTL cache has expired: a reading a few
+/// minutes old renders instantly and is replaced by the live refresh a moment
+/// later, which beats a blank panel. Providers with nothing known are omitted
+/// rather than faked, so the row appears when it has something to say.
+#[tauri::command]
+pub fn get_cached_providers(enabled: Vec<String>) -> ProvidersResponse {
+    let want = |id: &str| enabled.is_empty() || enabled.iter().any(|e| e == id);
+
+    let providers: Vec<ProviderUsage> = ["claude", "codex", "glm"]
+        .iter()
+        .filter(|id| want(id))
+        .filter_map(|id| {
+            cached(id).or_else(|| last_good().lock().ok()?.get(*id).cloned())
+        })
+        .collect();
 
     let now = Local::now();
     ProvidersResponse {
