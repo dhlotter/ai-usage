@@ -309,14 +309,28 @@ pub struct ProvidersResponse {
 #[tauri::command]
 pub fn get_providers(enabled: Vec<String>) -> ProvidersResponse {
     let want = |id: &str| enabled.is_empty() || enabled.iter().any(|e| e == id);
-    let mut providers: Vec<ProviderUsage> = Vec::new();
-    if want("claude") { providers.push(fetch_claude()); }
-    if want("codex") { providers.push(fetch_codex()); }
-    if want("glm") { providers.push(fetch_glm()); }
+
+    // Fetched in parallel: run back to back these take the sum of all three
+    // (~1.8s), which is long enough to show an empty popover on a cold start.
+    // ponytail: a thread per provider per refresh, a pool only if this grows.
+    let mut handles: Vec<std::thread::JoinHandle<ProviderUsage>> = Vec::new();
+    if want("claude") { handles.push(std::thread::spawn(fetch_claude)); }
+    if want("codex") { handles.push(std::thread::spawn(fetch_codex)); }
+    if want("glm") { handles.push(std::thread::spawn(fetch_glm)); }
+
+    let providers: Vec<ProviderUsage> = handles.into_iter().filter_map(|h| h.join().ok()).collect();
+
     let now = Local::now();
     ProvidersResponse {
         providers,
         last_updated: now.format("%H:%M:%S").to_string(),
         now_unix: now.timestamp(),
     }
+}
+
+/// Populate the cache at launch so the first click renders from a warm cache.
+/// Without this nothing is fetched until the webview has booted (~2.4s), and
+/// only then does the first request go out.
+pub fn warm_cache() {
+    std::thread::spawn(|| { get_providers(Vec::new()); });
 }

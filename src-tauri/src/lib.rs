@@ -43,6 +43,9 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Start fetching immediately rather than waiting for the webview.
+            providers::warm_cache();
+
             // Apply macOS vibrancy to the main window — Popover material matches system menu dropdowns
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
