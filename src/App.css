@@ -84,9 +84,10 @@ input, select { font-family: inherit; cursor: pointer; }
 
 /* ── Provider list ──────────────────────────────────────────────── */
 .provider-list {
-  padding: 0 16px 4px;
+  padding: 2px 10px 6px;
   display: flex;
   flex-direction: column;
+  gap: 7px;
 }
 
 .empty-state {
@@ -96,20 +97,25 @@ input, select { font-family: inherit; cursor: pointer; }
   font-size: 12px;
 }
 
+/* Each provider sits on a wash of its own hue, so the areas separate by colour
+   rather than by a rule. --wash-a/--wash-b/--edge are set per card in App.tsx,
+   and switch to the warning hue once a provider is actually in danger, so brand
+   colour never competes with the signal that matters. */
 .provider-card {
-  padding: 14px 0 14px;
-  border-top: 1px solid var(--separator);
+  padding: 11px 12px 12px;
+  border-radius: 9px;
+  background: linear-gradient(180deg, var(--wash-a), var(--wash-b));
+  border: 0.5px solid var(--edge);
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.provider-card:first-child { border-top: 1px solid var(--separator); }
-.provider-card.dimmed { opacity: 0.55; }
+.provider-card.dimmed { opacity: 0.62; }
 
 .provider-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
 }
 .provider-icon {
   width: 22px;
@@ -124,7 +130,7 @@ input, select { font-family: inherit; cursor: pointer; }
   letter-spacing: -0.5px;
 }
 .provider-name {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.01em;
   flex: 1;
@@ -138,8 +144,8 @@ input, select { font-family: inherit; cursor: pointer; }
   margin-right: 2px;
 }
 .provider-pct {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--text);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
@@ -149,17 +155,39 @@ input, select { font-family: inherit; cursor: pointer; }
   color: var(--text-3);
 }
 
+/* One line per window: label, meter, reset. The track sits darker than the
+   wash behind it so a filled bar reads at any tint. */
+.provider-window {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.window-label {
+  font-size: 11px;
+  color: var(--text-2);
+  width: 42px;
+  flex: none;
+}
+.window-reset {
+  font-size: 11px;
+  color: var(--text-3);
+  width: 64px;
+  flex: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 .progress-track {
-  height: 3px;
-  background: var(--track);
+  flex: 1;
+  height: 4px;
+  background: rgba(0, 0, 0, 0.3);
   border-radius: 2px;
   overflow: hidden;
-  margin-top: 2px;
 }
 .progress-fill {
   height: 100%;
   border-radius: 2px;
-  transition: width 0.4s ease;
+  transition: width 0.42s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .provider-detail {

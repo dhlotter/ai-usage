@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { isEnabled as isAutostartEnabled, enable as enableAutostart, disable as disableAutostart } from '@tauri-apps/plugin-autostart';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
-  ALERT_OPTIONS, ApiKeyRow, AUTH_MESSAGES, PROVIDERS, PROVIDER_AUTH, PROVIDER_META,
+  ALERT_OPTIONS, ApiKeyRow, AUTH_MESSAGES, PROVIDERS, PROVIDER_SETUP, PROVIDER_META,
   ProvidersResponse, REFRESH_OPTIONS, Select, Settings as SettingsShape, Toggle,
   loadSettings, saveSettings, useSettingsSync,
 } from './shared';
@@ -46,10 +47,10 @@ export default function SettingsWindow() {
     <div className="settings-window">
       <nav className="settings-nav">
         <button className={`nav-item ${section === 'general' ? 'active' : ''}`} onClick={() => setSection('general')}>
-          General
+          <IconSliders /> General
         </button>
         <button className={`nav-item ${section === 'providers' ? 'active' : ''}`} onClick={() => setSection('providers')}>
-          Providers
+          <IconStack /> Providers
         </button>
       </nav>
 
@@ -157,6 +158,7 @@ function Providers({ settings, update, data, refresh }: {
         const p = byId.get(id);
         const on = settings.enabled[id] ?? false;
         const connected = p?.auth_state === 'ok';
+        const setup = PROVIDER_SETUP[id];
 
         return (
           <section className="group provider-group" key={id}>
@@ -177,14 +179,70 @@ function Providers({ settings, update, data, refresh }: {
             </div>
 
             {on && (
-              <>
-                <div className="provider-help">{PROVIDER_AUTH[id]}</div>
+              <div className="provider-setup">
+                <p className="provider-help">{setup.how}</p>
+
+                {/* The sign-in command only matters while it is not connected. */}
+                {setup.command && !connected && <CommandChip command={setup.command} />}
+
                 {p?.accepts_key && <ApiKeyRow provider={id} onSaved={refresh} />}
-              </>
+
+                <div className="link-row">
+                  {setup.links.map(l => <ExternalLink key={l.url} {...l} />)}
+                </div>
+              </div>
             )}
           </section>
         );
       })}
     </>
+  );
+}
+
+function IconSliders() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+      <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+    </svg>
+  );
+}
+
+function IconStack() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 2 2 7l10 5 10-5-10-5Z" /><path d="m2 17 10 5 10-5" /><path d="m2 12 10 5 10-5" />
+    </svg>
+  );
+}
+
+/** Opens in the real browser, not inside the app's webview. */
+function ExternalLink({ label, url }: { label: string; url: string }) {
+  return (
+    <button className="ext-link" onClick={() => openUrl(url).catch(() => {})} title={url}>
+      {label}
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M7 17 17 7M9 7h8v8" />
+      </svg>
+    </button>
+  );
+}
+
+function CommandChip({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    } catch { /* clipboard unavailable, the command is still readable */ }
+  };
+
+  return (
+    <div className="cmd-chip">
+      <span className="cmd-hint">Run once to sign in</span>
+      <code className="cmd">{command}</code>
+      <button className="cmd-copy" onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+    </div>
   );
 }

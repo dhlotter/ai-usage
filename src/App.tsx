@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import {
-  AUTH_MESSAGES, PROVIDER_META, ProviderUsage, ProvidersResponse, Settings,
+  AUTH_MESSAGES, DANGER_RGB, NEUTRAL_RGB, PROVIDER_META, ProviderUsage, ProvidersResponse, Settings,
   barColor, fmtCountdown, loadSettings, pctTextColor, useSettingsSync,
 } from './shared';
 import './App.css';
@@ -124,10 +124,27 @@ export default function App() {
 
 function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec: number }) {
   const meta = PROVIDER_META[p.id];
+  const fh = p.five_hour;
+  const wk = p.weekly;
+  const fhPct = fh?.used_percent ?? 0;
+  const wkPct = wk?.used_percent ?? 0;
+
+  // Brand hue normally, warning hue once a limit is nearly spent, so the wash
+  // never competes with the colour that carries the actual signal.
+  const peak = Math.max(fhPct, wkPct);
+  const rgb = p.auth_state !== 'ok' ? NEUTRAL_RGB
+    : peak >= 90 ? DANGER_RGB
+    : meta.rgb;
+
+  const wash = {
+    '--wash-a': `rgba(${rgb}, 0.16)`,
+    '--wash-b': `rgba(${rgb}, 0.07)`,
+    '--edge': `rgba(${rgb}, 0.28)`,
+  } as React.CSSProperties;
 
   if (p.auth_state !== 'ok') {
     return (
-      <div className="provider-card dimmed">
+      <div className="provider-card dimmed" style={wash}>
         <div className="provider-head">
           <span className="provider-icon" style={{ background: meta.tint }}>{meta.icon}</span>
           <span className="provider-name">{p.display_name}</span>
@@ -138,14 +155,10 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
     );
   }
 
-  const fh = p.five_hour;
-  const wk = p.weekly;
   const fhSecs = fh ? fh.resets_at_unix - nowSec : 0;
-  const fhPct = fh?.used_percent ?? 0;
-  const wkPct = wk?.used_percent ?? 0;
 
   return (
-    <div className="provider-card">
+    <div className="provider-card" style={wash}>
       <div className="provider-head">
         <span className="provider-icon" style={{ background: meta.tint }}>{meta.icon}</span>
         <span className="provider-name">{p.display_name}</span>
@@ -153,26 +166,31 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
         {fh && <span className="provider-pct" style={{ color: pctTextColor(fhPct) }}>{Math.round(fhPct)}%</span>}
       </div>
       {fh && (
-        <>
+        <div className="provider-window">
+          <span className="window-label">5 hour</span>
           <div className="progress-track">
             <div className="progress-fill" style={{ width: `${Math.min(fhPct, 100)}%`, background: barColor(fhPct) }} />
           </div>
-          <div className="provider-detail">
-            <span>5-hour window</span>
-            <span>{fhSecs > 0 ? `resets in ${fmtCountdown(fhSecs)}` : 'ready'}</span>
-          </div>
-        </>
+          <span className="window-reset">{fhSecs > 0 ? fmtCountdown(fhSecs) : 'ready'}</span>
+        </div>
       )}
       {wk && (
-        <>
+        <div className="provider-window">
+          <span className="window-label">Weekly</span>
           <div className="progress-track">
             <div className="progress-fill" style={{ width: `${Math.min(wkPct, 100)}%`, background: barColor(wkPct) }} />
           </div>
-          <div className="provider-detail">
-            <span>Weekly · {Math.round(wkPct)}%</span>
-            <span>resets in {fmtCountdown(wk.resets_at_unix - nowSec)}</span>
+          <span className="window-reset">{fmtCountdown(wk.resets_at_unix - nowSec)}</span>
+        </div>
+      )}
+      {p.extra && (
+        <div className="provider-window">
+          <span className="window-label">{p.extra_label ?? 'Other'}</span>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${Math.min(p.extra.used_percent, 100)}%`, background: barColor(p.extra.used_percent) }} />
           </div>
-        </>
+          <span className="window-reset">{fmtCountdown(p.extra.resets_at_unix - nowSec)}</span>
+        </div>
       )}
     </div>
   );
