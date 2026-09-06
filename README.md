@@ -3,13 +3,9 @@
 A small macOS menu bar app showing how much of your AI coding limits you have used.
 One icon, a percentage on hover, a click for the detail. Nothing else.
 
-<!--
-  SCREENSHOT GOES HERE. Capture the popover with:
-    screencapture -i -o ~/ai-usage.png
-  (interactive, -o drops the drop shadow), then move it to docs/screenshot.png
-  and replace this comment with:
-    ![The popover](docs/screenshot.png)
--->
+<p align="center">
+  <img src="docs/screenshot.png" alt="The AI Usage popover, showing Claude Code, Codex and GLM usage bars" width="380">
+</p>
 
 ---
 
