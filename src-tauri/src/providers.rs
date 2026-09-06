@@ -96,6 +96,11 @@ pub struct ProviderUsage {
     pub short_label: String,
     pub five_hour: Option<LimitBucket>,
     pub weekly: Option<LimitBucket>,
+    /// One extra labelled window, for a limit that is neither of the above.
+    /// Only filled where the vendor exposes something that can actually block
+    /// work, so this stays a considered addition rather than a dumping ground.
+    pub extra: Option<LimitBucket>,
+    pub extra_label: Option<String>,
     pub plan_type: Option<String>,
     /// "ok" | "no_credentials" | "auth_failed" | "network_error" | "not_implemented"
     pub auth_state: String,
@@ -173,23 +178,21 @@ fn fetch_claude() -> ProviderUsage {
     u.auth_state = "ok".into();
     u.plan_type = kc["claudeAiOauth"]["subscriptionType"].as_str().map(String::from);
 
-    if let Some(rfc) = body["five_hour"]["resets_at"].as_str() {
-        if let Some(unix) = iso_to_unix(rfc) {
-            u.five_hour = Some(LimitBucket {
-                used_percent: body["five_hour"]["utilization"].as_f64().unwrap_or(0.0),
-                resets_at_unix: unix,
-                window_seconds: 5 * 3600,
-            });
-        }
+    // Keyed off the utilization, not the reset time: a window with no reset time
+    // is still a window worth showing, it just has no countdown yet.
+    if let Some(pct) = body["five_hour"]["utilization"].as_f64() {
+        u.five_hour = Some(LimitBucket {
+            used_percent: pct,
+            resets_at_unix: body["five_hour"]["resets_at"].as_str().and_then(iso_to_unix).unwrap_or(0),
+            window_seconds: 5 * 3600,
+        });
     }
-    if let Some(rfc) = body["seven_day"]["resets_at"].as_str() {
-        if let Some(unix) = iso_to_unix(rfc) {
-            u.weekly = Some(LimitBucket {
-                used_percent: body["seven_day"]["utilization"].as_f64().unwrap_or(0.0),
-                resets_at_unix: unix,
-                window_seconds: 7 * 24 * 3600,
-            });
-        }
+    if let Some(pct) = body["seven_day"]["utilization"].as_f64() {
+        u.weekly = Some(LimitBucket {
+            used_percent: pct,
+            resets_at_unix: body["seven_day"]["resets_at"].as_str().and_then(iso_to_unix).unwrap_or(0),
+            window_seconds: 7 * 24 * 3600,
+        });
     }
     put_good("claude", u.clone());
     put_cache("claude", u.clone(), MIN_FETCH_INTERVAL_SECS);
@@ -327,18 +330,30 @@ fn fetch_glm() -> ProviderUsage {
     u.auth_state = "ok".into();
     u.plan_type = body["data"]["level"].as_str().map(String::from);
 
-    // TOKENS_LIMIT is the rolling coding-token window (the one that blocks you).
-    // TIME_LIMIT is a separate daily MCP-tool counter, deliberately not shown.
+    // TOKENS_LIMIT is the rolling coding-token window, the one that blocks you.
+    // TIME_LIMIT is a daily allowance for the built-in tools (search, zread);
+    // exhausting it costs you those tools inside a session, so it earns a row.
+    if let Some(limits) = body["data"]["limits"].as_array() {
+        if let Some(t) = limits.iter().find(|l| l["type"].as_str() == Some("TIME_LIMIT")) {
+            u.extra = Some(LimitBucket {
+                used_percent: t["percentage"].as_f64().unwrap_or(0.0),
+                resets_at_unix: t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0),
+                window_seconds: 24 * 3600,
+            });
+            u.extra_label = Some("Tools".into());
+        }
+    }
     if let Some(limits) = body["data"]["limits"].as_array() {
         if let Some(t) = limits.iter().find(|l| l["type"].as_str() == Some("TOKENS_LIMIT")) {
-            if let Some(reset_ms) = t["nextResetTime"].as_i64() {
-                let hours = t["number"].as_i64().unwrap_or(5);
-                u.five_hour = Some(LimitBucket {
-                    used_percent: t["percentage"].as_f64().unwrap_or(0.0),
-                    resets_at_unix: reset_ms / 1000,
-                    window_seconds: hours * 3600,
-                });
-            }
+            // A freshly reset window comes back as percentage 0 with no
+            // nextResetTime at all. Requiring the reset time dropped the whole
+            // bucket and rendered an empty card; 0 reads as "ready" instead.
+            let hours = t["number"].as_i64().unwrap_or(5);
+            u.five_hour = Some(LimitBucket {
+                used_percent: t["percentage"].as_f64().unwrap_or(0.0),
+                resets_at_unix: t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0),
+                window_seconds: hours * 3600,
+            });
         }
     }
     put_good("glm", u.clone());
@@ -449,6 +464,28 @@ mod tests {
 
         assert_eq!(shown.auth_state, "network_error");
         invalidate(id);
+    }
+
+    /// A freshly reset Z.ai window returns percentage 0 and omits nextResetTime
+    /// entirely. Keying the bucket off the reset time dropped it and rendered a
+    /// provider card with no numbers at all.
+    #[test]
+    fn a_window_with_no_reset_time_still_produces_a_bucket() {
+        let body: Value = serde_json::from_str(
+            r#"{"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":0}]}}"#,
+        ).unwrap();
+
+        let limits = body["data"]["limits"].as_array().unwrap();
+        let t = limits.iter().find(|l| l["type"].as_str() == Some("TOKENS_LIMIT")).unwrap();
+        let bucket = LimitBucket {
+            used_percent: t["percentage"].as_f64().unwrap_or(0.0),
+            resets_at_unix: t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0),
+            window_seconds: t["number"].as_i64().unwrap_or(5) * 3600,
+        };
+
+        assert_eq!(bucket.used_percent, 0.0);
+        assert_eq!(bucket.resets_at_unix, 0, "no countdown, rather than no bucket");
+        assert_eq!(bucket.window_seconds, 5 * 3600);
     }
 
     #[test]

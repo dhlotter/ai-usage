@@ -12,6 +12,8 @@ export interface ProviderUsage {
   short_label: string;
   five_hour: LimitBucket | null;
   weekly: LimitBucket | null;
+  extra: LimitBucket | null;
+  extra_label: string | null;
   plan_type: string | null;
   auth_state: 'ok' | 'no_credentials' | 'auth_failed' | 'network_error' | 'not_implemented' | 'rate_limited';
   auth_error: string | null;
@@ -56,17 +58,45 @@ export const PROVIDERS: { id: string; name: string }[] = [
   { id: 'glm', name: 'GLM' },
 ];
 
-export const PROVIDER_META: Record<string, { icon: string; tint: string }> = {
-  claude: { icon: 'C', tint: '#d97706' },
-  codex:  { icon: '○', tint: '#10a37f' },
-  glm:    { icon: 'G', tint: '#4361ee' },
+/** `rgb` is the same colour as `tint`, as channels, for tinting a card wash. */
+export const PROVIDER_META: Record<string, { icon: string; tint: string; rgb: string }> = {
+  claude: { icon: 'C', tint: '#d97706', rgb: '217, 119, 6' },
+  codex:  { icon: '○', tint: '#10a37f', rgb: '16, 163, 127' },
+  glm:    { icon: 'G', tint: '#4361ee', rgb: '67, 97, 238' },
 };
 
-/** How each provider is authenticated, shown so setup is self-explanatory. */
-export const PROVIDER_AUTH: Record<string, string> = {
-  claude: 'Reads the credential Claude Code already stored. Run `claude` once to sign in.',
-  codex: 'Reads ~/.codex/auth.json. Run `codex` once to sign in.',
-  glm: 'Needs a Z.ai API key from z.ai/manage-apikey/apikey-list.',
+/** Wash hues for states that should not carry a brand colour. */
+export const DANGER_RGB = '255, 69, 58';
+export const NEUTRAL_RGB = '255, 255, 255';
+
+export interface ProviderSetup {
+  /** Where the reading comes from, in one line. */
+  how: string;
+  /** Run this once to sign in, shown with a copy button when disconnected. */
+  command?: string;
+  /** Everything needed to finish setup, so nothing has to be guessed at. */
+  links: { label: string; url: string }[];
+}
+
+/** All URLs checked to resolve; keep it that way when editing. */
+export const PROVIDER_SETUP: Record<string, ProviderSetup> = {
+  claude: {
+    how: 'Reads the credential Claude Code stores in your keychain when you sign in.',
+    command: 'claude',
+    links: [{ label: 'Install Claude Code', url: 'https://docs.claude.com/en/docs/claude-code/overview' }],
+  },
+  codex: {
+    how: 'Reads ~/.codex/auth.json, written when you sign in to the Codex CLI.',
+    command: 'codex',
+    links: [{ label: 'Install Codex CLI', url: 'https://developers.openai.com/codex/cli/' }],
+  },
+  glm: {
+    how: 'Needs a Z.ai API key. The key from your coding plan reports its own quota.',
+    links: [
+      { label: 'Get an API key', url: 'https://z.ai/manage-apikey/apikey-list' },
+      { label: 'Coding plan docs', url: 'https://docs.z.ai/devpack/overview' },
+    ],
+  },
 };
 
 // ── Settings storage ─────────────────────────────────────────────────
