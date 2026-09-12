@@ -89,7 +89,7 @@ export default function App() {
 
   // Tray provider — explicitly chosen by user; null = icon only
   const trayProv = settings.trayProvider
-    ? data?.providers.find(p => p.id === settings.trayProvider && p.auth_state === 'ok' && p.five_hour)
+    ? data?.providers.find(p => p.id === settings.trayProvider && p.auth_state === 'ok')
     : null;
 
   // Update tray — title shows the chosen countdown, tooltip always lists every enabled provider's %
@@ -98,13 +98,16 @@ export default function App() {
       .filter(p => settings.enabled[p.id] && p.auth_state === 'ok')
       .map(p => ({ p, w: worstWindow(p) }))
       .filter(({ w }) => w !== null)
-      .map(({ p, w }) => `${p.short_label} ${Math.round(w!.pct)}%`)
+      .map(({ p, w }) => `${p.short_label} ${Math.round(w!.used_percent)}%`)
       .join(' · ') || 'AI Usage';
 
-    if (!trayProv?.five_hour) {
+    // The countdown follows the same window as the headline: whichever is
+    // closest to its limit, not always the five-hour one.
+    const trayWindow = trayProv ? worstWindow(trayProv) : null;
+    if (!trayWindow) {
       invoke('update_tray', { text: '', tooltip }).catch(() => {});
     } else {
-      const secsRemaining = trayProv.five_hour.resets_at_unix - nowSec;
+      const secsRemaining = trayWindow.resets_at_unix - nowSec;
       invoke('update_tray', { text: fmtCountdown(secsRemaining), tooltip }).catch(() => {});
     }
 
@@ -116,13 +119,13 @@ export default function App() {
         if (!w) continue;
         // Keyed on the window's own reset so a fresh window can alert again.
         const key = `${p.id}-${w.label}-${w.resets_at_unix}-${settings.alertPct}`;
-        if (w.pct >= settings.alertPct && !notifiedRef.current.has(key)) {
+        if (w.used_percent >= settings.alertPct && !notifiedRef.current.has(key)) {
           notifiedRef.current.add(key);
           (async () => {
             const ok = await isPermissionGranted() || (await requestPermission()) === 'granted';
             if (ok) sendNotification({
               title: `${p.display_name}: usage alert`,
-              body: `${Math.round(w.pct)}% of ${w.label} limit used`,
+              body: `${Math.round(w.used_percent)}% of the ${w.label} limit used`,
             });
           })();
         }
@@ -161,17 +164,13 @@ export default function App() {
 
 function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec: number }) {
   const meta = PROVIDER_META[p.id];
-  const fh = p.five_hour;
-  const wk = p.weekly;
-  const fhPct = fh?.used_percent ?? 0;
-  const wkPct = wk?.used_percent ?? 0;
 
   // Brand hue normally, warning hue once a limit is nearly spent, so the wash
   // never competes with the colour that carries the actual signal. The wash and
   // the headline read the same number, which they did not before: the card went
   // red off the peak while the headline still showed the 5-hour figure.
   const worst = worstWindow(p);
-  const peak = worst?.pct ?? 0;
+  const peak = worst?.used_percent ?? 0;
   const rgb = p.auth_state !== 'ok' ? NEUTRAL_RGB
     : peak >= 90 ? DANGER_RGB
     : meta.rgb;
@@ -195,43 +194,26 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
     );
   }
 
-  const fhSecs = fh ? fh.resets_at_unix - nowSec : 0;
-
   return (
     <div className="provider-card" style={wash}>
       <div className="provider-head">
         <span className="provider-icon" style={{ background: meta.tint }}>{meta.icon}</span>
         <span className="provider-name">{p.display_name}</span>
         {p.plan_type && <span className="provider-plan">{p.plan_type}</span>}
-        {worst && <span className="provider-pct" style={{ color: pctTextColor(worst.pct) }}>{Math.round(worst.pct)}%</span>}
+        {worst && <span className="provider-pct" style={{ color: pctTextColor(worst.used_percent) }}>{Math.round(worst.used_percent)}%</span>}
       </div>
-      {fh && (
-        <div className="provider-window">
-          <span className="window-label">5 hour</span>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${Math.min(fhPct, 100)}%`, background: barColor(fhPct) }} />
+      {p.windows.map(w => {
+        const secs = w.resets_at_unix - nowSec;
+        return (
+          <div className="provider-window" key={w.label}>
+            <span className="window-label">{w.label}</span>
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${Math.min(w.used_percent, 100)}%`, background: barColor(w.used_percent) }} />
+            </div>
+            <span className="window-reset">{w.resets_at_unix > 0 && secs > 0 ? fmtCountdown(secs) : 'ready'}</span>
           </div>
-          <span className="window-reset">{fhSecs > 0 ? fmtCountdown(fhSecs) : 'ready'}</span>
-        </div>
-      )}
-      {wk && (
-        <div className="provider-window">
-          <span className="window-label">Weekly</span>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${Math.min(wkPct, 100)}%`, background: barColor(wkPct) }} />
-          </div>
-          <span className="window-reset">{fmtCountdown(wk.resets_at_unix - nowSec)}</span>
-        </div>
-      )}
-      {p.extra && (
-        <div className="provider-window">
-          <span className="window-label">{p.extra_label ?? 'Other'}</span>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${Math.min(p.extra.used_percent, 100)}%`, background: barColor(p.extra.used_percent) }} />
-          </div>
-          <span className="window-reset">{fmtCountdown(p.extra.resets_at_unix - nowSec)}</span>
-        </div>
-      )}
+        );
+      })}
     </div>
   );
 }

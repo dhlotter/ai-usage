@@ -4,16 +4,18 @@ import { emit, listen } from '@tauri-apps/api/event';
 
 // ── Types ────────────────────────────────────────────────────────────
 
-export interface LimitBucket { used_percent: number; resets_at_unix: number; window_seconds: number; }
+export interface UsageWindow {
+  label: string;
+  used_percent: number;
+  /** 0 when the provider reports no reset time, which reads as "ready". */
+  resets_at_unix: number;
+}
 
 export interface ProviderUsage {
-  id: 'claude' | 'codex' | 'glm';
+  id: 'claude' | 'codex' | 'glm' | 'antigravity';
   display_name: string;
   short_label: string;
-  five_hour: LimitBucket | null;
-  weekly: LimitBucket | null;
-  extra: LimitBucket | null;
-  extra_label: string | null;
+  windows: UsageWindow[];
   plan_type: string | null;
   auth_state: 'ok' | 'no_credentials' | 'auth_failed' | 'network_error' | 'not_implemented' | 'rate_limited';
   auth_error: string | null;
@@ -36,7 +38,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  enabled: { claude: true, codex: true, glm: true },
+  enabled: { claude: true, codex: true, glm: true, antigravity: true },
   notificationsEnabled: true,
   alertPct: 80,
   refreshSecs: 60,
@@ -56,6 +58,7 @@ export const PROVIDERS: { id: string; name: string }[] = [
   { id: 'claude', name: 'Claude Code' },
   { id: 'codex', name: 'Codex' },
   { id: 'glm', name: 'GLM' },
+  { id: 'antigravity', name: 'Antigravity' },
 ];
 
 /** `rgb` is the same colour as `tint`, as channels, for tinting a card wash. */
@@ -63,6 +66,7 @@ export const PROVIDER_META: Record<string, { icon: string; tint: string; rgb: st
   claude: { icon: 'C', tint: '#d97706', rgb: '217, 119, 6' },
   codex:  { icon: '○', tint: '#10a37f', rgb: '16, 163, 127' },
   glm:    { icon: 'G', tint: '#4361ee', rgb: '67, 97, 238' },
+  antigravity: { icon: 'A', tint: '#8b5cf6', rgb: '139, 92, 246' },
 };
 
 /** Wash hues for states that should not carry a brand colour. */
@@ -89,6 +93,10 @@ export const PROVIDER_SETUP: Record<string, ProviderSetup> = {
     how: 'Reads ~/.codex/auth.json, written when you sign in to the Codex CLI.',
     command: 'codex',
     links: [{ label: 'Install Codex CLI', url: 'https://developers.openai.com/codex/cli/' }],
+  },
+  antigravity: {
+    how: 'Read from the running Antigravity IDE. Its quota is only available while the IDE is open, so the card goes quiet when it is closed.',
+    links: [{ label: 'About Antigravity', url: 'https://antigravity.google/' }],
   },
   glm: {
     how: 'Needs a Z.ai API key. The key from your coding plan reports its own quota.',
@@ -143,14 +151,9 @@ export function fmtCountdown(secsRemaining: number): string {
 /// weekly limit at 100% with three days left on the clock rendered as "0%"
 /// beside a full red bar, and never raised an alert. A 5-hour window resets
 /// while you make coffee; a weekly one ends your week.
-export function worstWindow(p: ProviderUsage): { pct: number; label: string; resets_at_unix: number } | null {
-  const windows: { pct: number; label: string; resets_at_unix: number }[] = [];
-  if (p.five_hour) windows.push({ pct: p.five_hour.used_percent, label: '5-hour', resets_at_unix: p.five_hour.resets_at_unix });
-  if (p.weekly) windows.push({ pct: p.weekly.used_percent, label: 'weekly', resets_at_unix: p.weekly.resets_at_unix });
-  if (p.extra) windows.push({ pct: p.extra.used_percent, label: p.extra_label ?? 'extra', resets_at_unix: p.extra.resets_at_unix });
-
-  return windows.reduce<{ pct: number; label: string; resets_at_unix: number } | null>(
-    (worst, w) => (worst === null || w.pct > worst.pct ? w : worst),
+export function worstWindow(p: ProviderUsage): UsageWindow | null {
+  return (p.windows ?? []).reduce<UsageWindow | null>(
+    (worst, w) => (worst === null || w.used_percent > worst.used_percent ? w : worst),
     null,
   );
 }
