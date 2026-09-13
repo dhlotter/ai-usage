@@ -16,6 +16,10 @@ const ERROR_BACKOFF_SECS: i64 = 60;
 const RATE_LIMITED_BACKOFF_SECS: i64 = 120;
 /// However long a server asks us to wait, stop hiding the numbers after this.
 const MAX_BACKOFF_SECS: i64 = 600;
+/// The IDE is not open yet, which is far more likely to resolve on its own
+/// within seconds than a real auth failure is, most often because this app
+/// starts at login before the IDE has had a chance to.
+const AG_NOT_RUNNING_BACKOFF_SECS: i64 = 10;
 /// Every provider, in display order. The cached-paint path walks this, so a new
 /// provider missing from it would simply never appear on a cold start.
 const PROVIDER_IDS: [&str; 4] = ["claude", "codex", "glm", "antigravity"];
@@ -110,7 +114,7 @@ pub struct ProviderUsage {
     pub short_label: String,
     pub windows: Vec<UsageWindow>,
     pub plan_type: Option<String>,
-    /// "ok" | "no_credentials" | "auth_failed" | "network_error" | "not_implemented"
+    /// "ok" | "no_credentials" | "auth_failed" | "network_error" | "not_running" | "not_implemented"
     pub auth_state: String,
     pub auth_error: Option<String>,
     /// Whether this provider can be authenticated with a user-supplied API key.
@@ -365,12 +369,12 @@ const AG_PROCESS: &str = "language_server_macos_arm";
 /// runs more than one, and only some of their ports speak plain HTTP, so all of
 /// them are candidates rather than just the first process found.
 fn ag_endpoints() -> Vec<(u16, String)> {
-    let Ok(out) = Command::new("pgrep").args(["-f", AG_PROCESS]).output() else { return Vec::new() };
+    let Ok(out) = Command::new("/usr/bin/pgrep").args(["-f", AG_PROCESS]).output() else { return Vec::new() };
     let pids = String::from_utf8_lossy(&out.stdout);
     let mut endpoints = Vec::new();
 
     for pid in pids.split_whitespace() {
-        let Ok(out) = Command::new("ps").args(["-p", pid, "-o", "command="]).output() else { continue };
+        let Ok(out) = Command::new("/bin/ps").args(["-p", pid, "-o", "command="]).output() else { continue };
         let cmd = String::from_utf8_lossy(&out.stdout);
 
         let mut args = cmd.split_whitespace();
@@ -383,7 +387,7 @@ fn ag_endpoints() -> Vec<(u16, String)> {
         };
         let Some(token) = token else { continue };
 
-        let Ok(out) = Command::new("lsof")
+        let Ok(out) = Command::new("/usr/sbin/lsof")
             .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pid])
             .output() else { continue };
 
@@ -412,8 +416,10 @@ fn fetch_antigravity() -> ProviderUsage {
 
     let endpoints = ag_endpoints();
     if endpoints.is_empty() {
-        u.auth_error = Some("Antigravity is not running. Its quota is only readable while the IDE is open.".into());
-        return degrade("antigravity", u, ERROR_BACKOFF_SECS);
+        // Not a sign-in problem: there is no credential to hold, only a live IDE.
+        u.auth_state = "not_running".into();
+        u.auth_error = Some("Open Antigravity to read its quota. It keeps no reusable credential on disk.".into());
+        return degrade("antigravity", u, AG_NOT_RUNNING_BACKOFF_SECS);
     }
 
     // Plain HTTP only: some of these ports serve it unencrypted, and the rest
@@ -444,10 +450,20 @@ fn fetch_antigravity() -> ProviderUsage {
     for group in body["response"]["groups"].as_array().into_iter().flatten() {
         let pool = match group["displayName"].as_str() {
             Some(n) if n.starts_with("Gemini") => "Gemini",
-            Some(_) => "Claude/GPT",
+            Some(_) => "Claude",
             None => continue,
         };
-        for bucket in group["buckets"].as_array().into_iter().flatten() {
+        // The API lists weekly before the five hour window; every card reads
+        // shortest window first, so the buckets are ordered rather than taken
+        // as they arrive.
+        let mut buckets: Vec<&Value> = group["buckets"].as_array().into_iter().flatten().collect();
+        buckets.sort_by_key(|b| match b["window"].as_str() {
+            Some("5h") => 0,
+            Some("weekly") => 1,
+            _ => 2,
+        });
+
+        for bucket in buckets {
             // Reported as the fraction still available, the inverse of every
             // other provider, so invert it to keep "used" consistent.
             let Some(remaining) = bucket["remainingFraction"].as_f64() else { continue };
@@ -456,12 +472,11 @@ fn fetch_antigravity() -> ProviderUsage {
                 Some("weekly") => "wk",
                 other => other.unwrap_or("?"),
             };
-            let w = UsageWindow::new(
+            u.windows.push(UsageWindow::new(
                 &format!("{pool} {short}"),
                 (1.0 - remaining) * 100.0,
                 bucket["resetTime"].as_str().and_then(iso_to_unix).unwrap_or(0),
-            );
-            u.windows.push(w);
+            ));
         }
     }
 
@@ -619,21 +634,31 @@ mod tests {
     /// other provider, and its two pools are never merged.
     #[test]
     fn antigravity_groups_become_separate_inverted_windows() {
+        // Buckets deliberately in the order the API actually sends them,
+        // weekly before five hour, so the ordering is what is under test.
         let body: Value = serde_json::from_str(r#"{"response":{"groups":[
           {"displayName":"Gemini Models","buckets":[
+            {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.99,"resetTime":"2026-09-19T07:06:34Z"},
             {"bucketId":"gemini-5h","window":"5h","remainingFraction":0.94,"resetTime":"2026-09-12T12:06:34Z"}]},
           {"displayName":"Claude and GPT models","buckets":[
-            {"bucketId":"3p-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-09-19T11:45:07Z"}]}
+            {"bucketId":"3p-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-09-19T11:45:07Z"},
+            {"bucketId":"3p-5h","window":"5h","remainingFraction":1,"resetTime":"2026-09-12T16:45:07Z"}]}
         ]}}"#).unwrap();
 
         let mut windows = Vec::new();
         for group in body["response"]["groups"].as_array().into_iter().flatten() {
             let pool = match group["displayName"].as_str() {
                 Some(n) if n.starts_with("Gemini") => "Gemini",
-                Some(_) => "Claude/GPT",
+                Some(_) => "Claude",
                 None => continue,
             };
-            for bucket in group["buckets"].as_array().into_iter().flatten() {
+            let mut buckets: Vec<&Value> = group["buckets"].as_array().into_iter().flatten().collect();
+            buckets.sort_by_key(|b| match b["window"].as_str() {
+                Some("5h") => 0,
+                Some("weekly") => 1,
+                _ => 2,
+            });
+            for bucket in buckets {
                 let Some(remaining) = bucket["remainingFraction"].as_f64() else { continue };
                 let short = match bucket["window"].as_str() {
                     Some("5h") => "5h",
@@ -645,11 +670,14 @@ mod tests {
             }
         }
 
-        assert_eq!(windows.len(), 2, "one window per bucket, pools kept apart");
-        assert_eq!(windows[0].label, "Gemini 5h");
+        let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Gemini 5h", "Gemini wk", "Claude 5h", "Claude wk"],
+            "pools stay apart and each reads shortest window first, whatever order the API sent"
+        );
         assert!((windows[0].used_percent - 6.0).abs() < 0.001, "0.94 remaining is 6% used");
-        assert_eq!(windows[1].label, "Claude/GPT wk");
-        assert_eq!(windows[1].used_percent, 0.0, "fully remaining is nothing used");
+        assert_eq!(windows[3].used_percent, 0.0, "fully remaining is nothing used");
     }
 
     #[test]

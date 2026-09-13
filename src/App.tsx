@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import {
   AUTH_MESSAGES, DANGER_RGB, NEUTRAL_RGB, PROVIDER_META, ProviderUsage, ProvidersResponse, Settings,
-  barColor, fmtCountdown, loadSettings, pctTextColor, useSettingsSync, worstWindow,
+  barColor, displayPct, fmtCountdown, loadSettings, pctTextColor, useSettingsSync, worstWindow,
 } from './shared';
 import './App.css';
 
@@ -98,7 +98,7 @@ export default function App() {
       .filter(p => settings.enabled[p.id] && p.auth_state === 'ok')
       .map(p => ({ p, w: worstWindow(p) }))
       .filter(({ w }) => w !== null)
-      .map(({ p, w }) => `${p.short_label} ${Math.round(w!.used_percent)}%`)
+      .map(({ p, w }) => `${p.short_label} ${Math.round(displayPct(w!.used_percent, settings.showRemaining))}%${settings.showRemaining ? ' left' : ''}`)
       .join(' · ') || 'AI Usage';
 
     // The countdown follows the same window as the headline: whichever is
@@ -125,7 +125,9 @@ export default function App() {
             const ok = await isPermissionGranted() || (await requestPermission()) === 'granted';
             if (ok) sendNotification({
               title: `${p.display_name}: usage alert`,
-              body: `${Math.round(w.used_percent)}% of the ${w.label} limit used`,
+              body: settings.showRemaining
+                ? `${Math.round(100 - w.used_percent)}% of the ${w.label} limit left`
+                : `${Math.round(w.used_percent)}% of the ${w.label} limit used`,
             });
           })();
         }
@@ -151,7 +153,7 @@ export default function App() {
           <div className="empty-state">No providers enabled — open Settings.</div>
         )}
         {visibleProviders.map(p => (
-          <ProviderRow key={p.id} provider={p} nowSec={nowSec} />
+          <ProviderRow key={p.id} provider={p} nowSec={nowSec} showRemaining={settings.showRemaining} />
         ))}
       </div>
 
@@ -162,7 +164,9 @@ export default function App() {
   );
 }
 
-function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec: number }) {
+function ProviderRow({ provider: p, nowSec, showRemaining }: {
+  provider: ProviderUsage; nowSec: number; showRemaining: boolean;
+}) {
   const meta = PROVIDER_META[p.id];
 
   // Brand hue normally, warning hue once a limit is nearly spent, so the wash
@@ -200,7 +204,11 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
         <span className="provider-icon" style={{ background: meta.tint }}>{meta.icon}</span>
         <span className="provider-name">{p.display_name}</span>
         {p.plan_type && <span className="provider-plan">{p.plan_type}</span>}
-        {worst && <span className="provider-pct" style={{ color: pctTextColor(worst.used_percent) }}>{Math.round(worst.used_percent)}%</span>}
+        {worst && (
+          <span className="provider-pct" style={{ color: pctTextColor(worst.used_percent) }}>
+            {Math.round(displayPct(worst.used_percent, showRemaining))}%
+          </span>
+        )}
       </div>
       {p.windows.map(w => {
         const secs = w.resets_at_unix - nowSec;
@@ -208,7 +216,12 @@ function ProviderRow({ provider: p, nowSec }: { provider: ProviderUsage; nowSec:
           <div className="provider-window" key={w.label}>
             <span className="window-label">{w.label}</span>
             <div className="progress-track">
-              <div className="progress-fill" style={{ width: `${Math.min(w.used_percent, 100)}%`, background: barColor(w.used_percent) }} />
+              {/* The bar tracks whatever is being shown, so in remaining mode it
+                  drains as you spend. Its colour still reads the used figure. */}
+              <div className="progress-fill" style={{
+                width: `${Math.min(Math.max(displayPct(w.used_percent, showRemaining), 0), 100)}%`,
+                background: barColor(w.used_percent),
+              }} />
             </div>
             <span className="window-reset">{w.resets_at_unix > 0 && secs > 0 ? fmtCountdown(secs) : 'ready'}</span>
           </div>

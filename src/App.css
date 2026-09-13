@@ -165,8 +165,9 @@ input, select { font-family: inherit; cursor: pointer; }
 .window-label {
   font-size: 11px;
   color: var(--text-2);
-  width: 42px;
+  width: 70px;
   flex: none;
+  white-space: nowrap;
 }
 .window-reset {
   font-size: 11px;

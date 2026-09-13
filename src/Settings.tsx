@@ -90,6 +90,23 @@ function General({ settings, update }: { settings: SettingsShape; update: (p: Pa
       </section>
 
       <section className="group">
+        <div className="group-label">Display</div>
+        <div className="row">
+          <div className="row-text">
+            <span className="row-label">Show limits as</span>
+            <span className="row-hint">Bars fill up as you spend, or drain as you run out.</span>
+          </div>
+          <Select
+            value={settings.showRemaining ? 'remaining' : 'used'}
+            onChange={v => update({ showRemaining: v === 'remaining' })}
+          >
+            <option value="used">Used</option>
+            <option value="remaining">Remaining</option>
+          </Select>
+        </div>
+      </section>
+
+      <section className="group">
         <div className="group-label">Menu bar</div>
         <div className="row">
           <div className="row-text">
@@ -119,7 +136,11 @@ function General({ settings, update }: { settings: SettingsShape; update: (p: Pa
             onChange={v => update({ alertPct: parseInt(v) })}
             disabled={!settings.notificationsEnabled}
           >
-            {ALERT_OPTIONS.map(p => <option key={p} value={p}>{p}% used</option>)}
+            {ALERT_OPTIONS.map(p => (
+              <option key={p} value={p}>
+                {settings.showRemaining ? `${100 - p}% left` : `${p}% used`}
+              </option>
+            ))}
           </Select>
         </div>
       </section>

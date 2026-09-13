@@ -17,7 +17,7 @@ export interface ProviderUsage {
   short_label: string;
   windows: UsageWindow[];
   plan_type: string | null;
-  auth_state: 'ok' | 'no_credentials' | 'auth_failed' | 'network_error' | 'not_implemented' | 'rate_limited';
+  auth_state: 'ok' | 'no_credentials' | 'auth_failed' | 'network_error' | 'not_running' | 'not_implemented' | 'rate_limited';
   auth_error: string | null;
   accepts_key: boolean;
 }
@@ -35,6 +35,8 @@ export interface Settings {
   refreshSecs: number;
   /** which provider's countdown to display in the menubar, or null for icon-only */
   trayProvider: string | null;
+  /** Show what is left rather than what has been spent. */
+  showRemaining: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -43,6 +45,7 @@ export const DEFAULT_SETTINGS: Settings = {
   alertPct: 80,
   refreshSecs: 60,
   trayProvider: null,
+  showRemaining: false,
 };
 
 export const ALERT_OPTIONS = [50, 75, 80, 90, 95];
@@ -158,6 +161,15 @@ export function worstWindow(p: ProviderUsage): UsageWindow | null {
   );
 }
 
+/** Percentages are always stored as used; this is the only place that flips. */
+export function displayPct(usedPercent: number, showRemaining: boolean): number {
+  return showRemaining ? 100 - usedPercent : usedPercent;
+}
+
+/**
+ * Colour always comes from the used figure, never the displayed one. Reading it
+ * off "8% remaining" would paint a nearly spent limit green.
+ */
 export function barColor(pct: number): string {
   if (pct >= 90) return 'var(--red)';
   if (pct >= 75) return 'var(--yellow)';
@@ -176,6 +188,7 @@ export const AUTH_MESSAGES: Record<string, string> = {
   no_credentials: 'Not signed in',
   auth_failed: 'Token expired',
   network_error: 'Connection error',
+  not_running: 'Not running',
   not_implemented: 'Coming soon',
   rate_limited: 'Rate limited',
 };
