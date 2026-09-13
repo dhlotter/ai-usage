@@ -16,6 +16,13 @@ const ERROR_BACKOFF_SECS: i64 = 60;
 const RATE_LIMITED_BACKOFF_SECS: i64 = 120;
 /// However long a server asks us to wait, stop hiding the numbers after this.
 const MAX_BACKOFF_SECS: i64 = 600;
+/// The IDE is not open yet, which is far more likely to resolve on its own
+/// within seconds than a real auth failure is, most often because this app
+/// starts at login before the IDE has had a chance to.
+const AG_NOT_RUNNING_BACKOFF_SECS: i64 = 10;
+/// Every provider, in display order. The cached-paint path walks this, so a new
+/// provider missing from it would simply never appear on a cold start.
+const PROVIDER_IDS: [&str; 4] = ["claude", "codex", "glm", "antigravity"];
 
 #[derive(Clone)]
 struct Cached {
@@ -82,11 +89,22 @@ fn degrade(id: &str, failure: ProviderUsage, backoff_secs: i64) -> ProviderUsage
     failure
 }
 
+/// One limit window. Providers report anywhere from one of these to four, on
+/// windows that are not always a tidy five-hour plus weekly pair, so they are a
+/// list rather than fixed slots. Every window ranks equally: the frontend picks
+/// whichever is closest to its limit, because that is the one that stops you.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct LimitBucket {
+pub struct UsageWindow {
+    pub label: String,
     pub used_percent: f64,
+    /// 0 when the provider reports no reset time, which reads as "ready".
     pub resets_at_unix: i64,
-    pub window_seconds: i64,
+}
+
+impl UsageWindow {
+    fn new(label: &str, used_percent: f64, resets_at_unix: i64) -> Self {
+        Self { label: label.into(), used_percent, resets_at_unix }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -94,15 +112,9 @@ pub struct ProviderUsage {
     pub id: String,
     pub display_name: String,
     pub short_label: String,
-    pub five_hour: Option<LimitBucket>,
-    pub weekly: Option<LimitBucket>,
-    /// One extra labelled window, for a limit that is neither of the above.
-    /// Only filled where the vendor exposes something that can actually block
-    /// work, so this stays a considered addition rather than a dumping ground.
-    pub extra: Option<LimitBucket>,
-    pub extra_label: Option<String>,
+    pub windows: Vec<UsageWindow>,
     pub plan_type: Option<String>,
-    /// "ok" | "no_credentials" | "auth_failed" | "network_error" | "not_implemented"
+    /// "ok" | "no_credentials" | "auth_failed" | "network_error" | "not_running" | "not_implemented"
     pub auth_state: String,
     pub auth_error: Option<String>,
     /// Whether this provider can be authenticated with a user-supplied API key.
@@ -181,18 +193,12 @@ fn fetch_claude() -> ProviderUsage {
     // Keyed off the utilization, not the reset time: a window with no reset time
     // is still a window worth showing, it just has no countdown yet.
     if let Some(pct) = body["five_hour"]["utilization"].as_f64() {
-        u.five_hour = Some(LimitBucket {
-            used_percent: pct,
-            resets_at_unix: body["five_hour"]["resets_at"].as_str().and_then(iso_to_unix).unwrap_or(0),
-            window_seconds: 5 * 3600,
-        });
+        u.windows.push(UsageWindow::new("5 hour", pct,
+            body["five_hour"]["resets_at"].as_str().and_then(iso_to_unix).unwrap_or(0)));
     }
     if let Some(pct) = body["seven_day"]["utilization"].as_f64() {
-        u.weekly = Some(LimitBucket {
-            used_percent: pct,
-            resets_at_unix: body["seven_day"]["resets_at"].as_str().and_then(iso_to_unix).unwrap_or(0),
-            window_seconds: 7 * 24 * 3600,
-        });
+        u.windows.push(UsageWindow::new("Weekly", pct,
+            body["seven_day"]["resets_at"].as_str().and_then(iso_to_unix).unwrap_or(0)));
     }
     put_good("claude", u.clone());
     put_cache("claude", u.clone(), MIN_FETCH_INTERVAL_SECS);
@@ -255,19 +261,13 @@ fn fetch_codex() -> ProviderUsage {
     u.plan_type = body["plan_type"].as_str().map(String::from);
 
     let rl = &body["rate_limit"];
-    if let Some(reset_at) = rl["primary_window"]["reset_at"].as_i64() {
-        u.five_hour = Some(LimitBucket {
-            used_percent: rl["primary_window"]["used_percent"].as_f64().unwrap_or(0.0),
-            resets_at_unix: reset_at,
-            window_seconds: rl["primary_window"]["limit_window_seconds"].as_i64().unwrap_or(5 * 3600),
-        });
+    if let Some(pct) = rl["primary_window"]["used_percent"].as_f64() {
+        u.windows.push(UsageWindow::new("5 hour", pct,
+            rl["primary_window"]["reset_at"].as_i64().unwrap_or(0)));
     }
-    if let Some(reset_at) = rl["secondary_window"]["reset_at"].as_i64() {
-        u.weekly = Some(LimitBucket {
-            used_percent: rl["secondary_window"]["used_percent"].as_f64().unwrap_or(0.0),
-            resets_at_unix: reset_at,
-            window_seconds: rl["secondary_window"]["limit_window_seconds"].as_i64().unwrap_or(7 * 24 * 3600),
-        });
+    if let Some(pct) = rl["secondary_window"]["used_percent"].as_f64() {
+        u.windows.push(UsageWindow::new("Weekly", pct,
+            rl["secondary_window"]["reset_at"].as_i64().unwrap_or(0)));
     }
     put_good("codex", u.clone());
     put_cache("codex", u.clone(), MIN_FETCH_INTERVAL_SECS);
@@ -334,30 +334,154 @@ fn fetch_glm() -> ProviderUsage {
     // TIME_LIMIT is a daily allowance for the built-in tools (search, zread);
     // exhausting it costs you those tools inside a session, so it earns a row.
     if let Some(limits) = body["data"]["limits"].as_array() {
-        if let Some(t) = limits.iter().find(|l| l["type"].as_str() == Some("TIME_LIMIT")) {
-            u.extra = Some(LimitBucket {
-                used_percent: t["percentage"].as_f64().unwrap_or(0.0),
-                resets_at_unix: t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0),
-                window_seconds: 24 * 3600,
-            });
-            u.extra_label = Some("Tools".into());
+        let at = |kind: &str| limits.iter().find(|l| l["type"].as_str() == Some(kind)).cloned();
+        // A freshly reset window comes back as percentage 0 with no
+        // nextResetTime at all, so the reset time never gates the window.
+        if let Some(t) = at("TOKENS_LIMIT") {
+            u.windows.push(UsageWindow::new("5 hour",
+                t["percentage"].as_f64().unwrap_or(0.0),
+                t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0)));
         }
-    }
-    if let Some(limits) = body["data"]["limits"].as_array() {
-        if let Some(t) = limits.iter().find(|l| l["type"].as_str() == Some("TOKENS_LIMIT")) {
-            // A freshly reset window comes back as percentage 0 with no
-            // nextResetTime at all. Requiring the reset time dropped the whole
-            // bucket and rendered an empty card; 0 reads as "ready" instead.
-            let hours = t["number"].as_i64().unwrap_or(5);
-            u.five_hour = Some(LimitBucket {
-                used_percent: t["percentage"].as_f64().unwrap_or(0.0),
-                resets_at_unix: t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0),
-                window_seconds: hours * 3600,
-            });
+        if let Some(t) = at("TIME_LIMIT") {
+            u.windows.push(UsageWindow::new("Tools",
+                t["percentage"].as_f64().unwrap_or(0.0),
+                t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0)));
         }
     }
     put_good("glm", u.clone());
     put_cache("glm", u.clone(), MIN_FETCH_INTERVAL_SECS);
+    u
+}
+
+// ── Antigravity ─────────────────────────────────────────────────────
+//
+// The odd one out. Antigravity has no readable stored credential: the one on
+// disk is a dead artifact that signing in never refreshes. Quota lives behind
+// an RPC on a language server the IDE starts, whose port and CSRF token are
+// generated per launch and only discoverable from its command line. So this is
+// the single provider that scrapes a process instead of reading a credential,
+// and it only reports while the IDE is open.
+
+const AG_RPC: &str = "exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
+const AG_PROCESS: &str = "language_server_macos_arm";
+
+/// Every (port, csrf token) pair the running language servers expose. The IDE
+/// runs more than one, and only some of their ports speak plain HTTP, so all of
+/// them are candidates rather than just the first process found.
+fn ag_endpoints() -> Vec<(u16, String)> {
+    let Ok(out) = Command::new("/usr/bin/pgrep").args(["-f", AG_PROCESS]).output() else { return Vec::new() };
+    let pids = String::from_utf8_lossy(&out.stdout);
+    let mut endpoints = Vec::new();
+
+    for pid in pids.split_whitespace() {
+        let Ok(out) = Command::new("/bin/ps").args(["-p", pid, "-o", "command="]).output() else { continue };
+        let cmd = String::from_utf8_lossy(&out.stdout);
+
+        let mut args = cmd.split_whitespace();
+        let token = loop {
+            match args.next() {
+                Some("--csrf_token") => break args.next().map(String::from),
+                Some(_) => continue,
+                None => break None,
+            }
+        };
+        let Some(token) = token else { continue };
+
+        let Ok(out) = Command::new("/usr/sbin/lsof")
+            .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pid])
+            .output() else { continue };
+
+        for line in String::from_utf8_lossy(&out.stdout).lines().skip(1) {
+            if let Some(port) = line.split_whitespace().nth(8)
+                .and_then(|a| a.rsplit(':').next())
+                .and_then(|p| p.parse::<u16>().ok())
+            {
+                endpoints.push((port, token.clone()));
+            }
+        }
+    }
+    endpoints
+}
+
+fn fetch_antigravity() -> ProviderUsage {
+    if let Some(c) = cached("antigravity") { return c; }
+
+    let mut u = ProviderUsage {
+        id: "antigravity".into(),
+        display_name: "Antigravity".into(),
+        short_label: "AG".into(),
+        auth_state: "no_credentials".into(),
+        ..Default::default()
+    };
+
+    let endpoints = ag_endpoints();
+    if endpoints.is_empty() {
+        // Not a sign-in problem: there is no credential to hold, only a live IDE.
+        u.auth_state = "not_running".into();
+        u.auth_error = Some("Open Antigravity to read its quota. It keeps no reusable credential on disk.".into());
+        return degrade("antigravity", u, AG_NOT_RUNNING_BACKOFF_SECS);
+    }
+
+    // Plain HTTP only: some of these ports serve it unencrypted, and the rest
+    // present a self-signed certificate no client should be taught to accept.
+    let body = endpoints.iter().find_map(|(port, token)| {
+        ureq::post(&format!("http://127.0.0.1:{port}/{AG_RPC}"))
+            .set("Content-Type", "application/json")
+            .set("X-Codeium-Csrf-Token", token)
+            .set("Connect-Protocol-Version", "1")
+            .set("User-Agent", USER_AGENT)
+            .timeout(std::time::Duration::from_secs(5))
+            .send_string(r#"{"metadata":{"ideName":"antigravity","extensionName":"antigravity","locale":"en","ideVersion":"unknown"}}"#)
+            .ok()
+            .and_then(|r| r.into_json::<Value>().ok())
+            .filter(|v| v["response"]["groups"].is_array())
+    });
+
+    let Some(body) = body else {
+        u.auth_state = "network_error".into();
+        u.auth_error = Some("Found Antigravity but its quota service did not answer.".into());
+        return degrade("antigravity", u, ERROR_BACKOFF_SECS);
+    };
+
+    u.auth_state = "ok".into();
+
+    // Each group is an independent pool with its own windows: the reset times
+    // differ and they drain separately, so they are never merged.
+    for group in body["response"]["groups"].as_array().into_iter().flatten() {
+        let pool = match group["displayName"].as_str() {
+            Some(n) if n.starts_with("Gemini") => "Gemini",
+            Some(_) => "Claude",
+            None => continue,
+        };
+        // The API lists weekly before the five hour window; every card reads
+        // shortest window first, so the buckets are ordered rather than taken
+        // as they arrive.
+        let mut buckets: Vec<&Value> = group["buckets"].as_array().into_iter().flatten().collect();
+        buckets.sort_by_key(|b| match b["window"].as_str() {
+            Some("5h") => 0,
+            Some("weekly") => 1,
+            _ => 2,
+        });
+
+        for bucket in buckets {
+            // Reported as the fraction still available, the inverse of every
+            // other provider, so invert it to keep "used" consistent.
+            let Some(remaining) = bucket["remainingFraction"].as_f64() else { continue };
+            let short = match bucket["window"].as_str() {
+                Some("5h") => "5h",
+                Some("weekly") => "wk",
+                other => other.unwrap_or("?"),
+            };
+            u.windows.push(UsageWindow::new(
+                &format!("{pool} {short}"),
+                (1.0 - remaining) * 100.0,
+                bucket["resetTime"].as_str().and_then(iso_to_unix).unwrap_or(0),
+            ));
+        }
+    }
+
+    put_good("antigravity", u.clone());
+    put_cache("antigravity", u.clone(), MIN_FETCH_INTERVAL_SECS);
     u
 }
 
@@ -427,7 +551,7 @@ mod tests {
         ProviderUsage {
             id: id.into(),
             auth_state: state.into(),
-            five_hour: Some(LimitBucket { used_percent: pct, resets_at_unix: 0, window_seconds: 0 }),
+            windows: vec![UsageWindow::new("5 hour", pct, 0)],
             ..Default::default()
         }
     }
@@ -440,7 +564,7 @@ mod tests {
         let shown = degrade(id, usage(id, "rate_limited", 0.0), 60);
 
         assert_eq!(shown.auth_state, "ok", "a rate limit should not blank a good reading");
-        assert_eq!(shown.five_hour.unwrap().used_percent, 42.0);
+        assert_eq!(shown.windows[0].used_percent, 42.0);
         invalidate(id);
     }
 
@@ -457,7 +581,7 @@ mod tests {
         assert_eq!(res.providers.len(), 1, "codex has nothing known, so it is omitted rather than faked");
         assert_eq!(res.providers[0].id, "claude");
         assert_eq!(
-            res.providers[0].five_hour.as_ref().unwrap().used_percent,
+            res.providers[0].windows[0].used_percent,
             42.0,
             "an expired TTL cache should still paint from the last good reading"
         );
@@ -488,25 +612,72 @@ mod tests {
     }
 
     /// A freshly reset Z.ai window returns percentage 0 and omits nextResetTime
-    /// entirely. Keying the bucket off the reset time dropped it and rendered a
+    /// entirely. Keying the window off the reset time dropped it and rendered a
     /// provider card with no numbers at all.
     #[test]
-    fn a_window_with_no_reset_time_still_produces_a_bucket() {
+    fn a_window_with_no_reset_time_still_produces_a_window() {
         let body: Value = serde_json::from_str(
             r#"{"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":0}]}}"#,
         ).unwrap();
 
-        let limits = body["data"]["limits"].as_array().unwrap();
-        let t = limits.iter().find(|l| l["type"].as_str() == Some("TOKENS_LIMIT")).unwrap();
-        let bucket = LimitBucket {
-            used_percent: t["percentage"].as_f64().unwrap_or(0.0),
-            resets_at_unix: t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0),
-            window_seconds: t["number"].as_i64().unwrap_or(5) * 3600,
-        };
+        let t = body["data"]["limits"].as_array().unwrap().iter()
+            .find(|l| l["type"].as_str() == Some("TOKENS_LIMIT")).unwrap().clone();
+        let w = UsageWindow::new("5 hour",
+            t["percentage"].as_f64().unwrap_or(0.0),
+            t["nextResetTime"].as_i64().map(|ms| ms / 1000).unwrap_or(0));
 
-        assert_eq!(bucket.used_percent, 0.0);
-        assert_eq!(bucket.resets_at_unix, 0, "no countdown, rather than no bucket");
-        assert_eq!(bucket.window_seconds, 5 * 3600);
+        assert_eq!(w.used_percent, 0.0);
+        assert_eq!(w.resets_at_unix, 0, "no countdown, rather than no window");
+    }
+
+    /// Antigravity reports the fraction still available, the inverse of every
+    /// other provider, and its two pools are never merged.
+    #[test]
+    fn antigravity_groups_become_separate_inverted_windows() {
+        // Buckets deliberately in the order the API actually sends them,
+        // weekly before five hour, so the ordering is what is under test.
+        let body: Value = serde_json::from_str(r#"{"response":{"groups":[
+          {"displayName":"Gemini Models","buckets":[
+            {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.99,"resetTime":"2026-09-19T07:06:34Z"},
+            {"bucketId":"gemini-5h","window":"5h","remainingFraction":0.94,"resetTime":"2026-09-12T12:06:34Z"}]},
+          {"displayName":"Claude and GPT models","buckets":[
+            {"bucketId":"3p-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-09-19T11:45:07Z"},
+            {"bucketId":"3p-5h","window":"5h","remainingFraction":1,"resetTime":"2026-09-12T16:45:07Z"}]}
+        ]}}"#).unwrap();
+
+        let mut windows = Vec::new();
+        for group in body["response"]["groups"].as_array().into_iter().flatten() {
+            let pool = match group["displayName"].as_str() {
+                Some(n) if n.starts_with("Gemini") => "Gemini",
+                Some(_) => "Claude",
+                None => continue,
+            };
+            let mut buckets: Vec<&Value> = group["buckets"].as_array().into_iter().flatten().collect();
+            buckets.sort_by_key(|b| match b["window"].as_str() {
+                Some("5h") => 0,
+                Some("weekly") => 1,
+                _ => 2,
+            });
+            for bucket in buckets {
+                let Some(remaining) = bucket["remainingFraction"].as_f64() else { continue };
+                let short = match bucket["window"].as_str() {
+                    Some("5h") => "5h",
+                    Some("weekly") => "wk",
+                    other => other.unwrap_or("?"),
+                };
+                windows.push(UsageWindow::new(&format!("{pool} {short}"), (1.0 - remaining) * 100.0,
+                    bucket["resetTime"].as_str().and_then(iso_to_unix).unwrap_or(0)));
+            }
+        }
+
+        let labels: Vec<&str> = windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Gemini 5h", "Gemini wk", "Claude 5h", "Claude wk"],
+            "pools stay apart and each reads shortest window first, whatever order the API sent"
+        );
+        assert!((windows[0].used_percent - 6.0).abs() < 0.001, "0.94 remaining is 6% used");
+        assert_eq!(windows[3].used_percent, 0.0, "fully remaining is nothing used");
     }
 
     #[test]
@@ -557,6 +728,7 @@ pub fn get_providers(enabled: Vec<String>) -> ProvidersResponse {
     if want("claude") { handles.push(std::thread::spawn(fetch_claude)); }
     if want("codex") { handles.push(std::thread::spawn(fetch_codex)); }
     if want("glm") { handles.push(std::thread::spawn(fetch_glm)); }
+    if want("antigravity") { handles.push(std::thread::spawn(fetch_antigravity)); }
 
     let providers: Vec<ProviderUsage> = handles.into_iter().filter_map(|h| h.join().ok()).collect();
 
@@ -584,7 +756,7 @@ pub fn get_providers(enabled: Vec<String>) -> ProvidersResponse {
 pub fn get_cached_providers(enabled: Vec<String>) -> ProvidersResponse {
     let want = |id: &str| enabled.is_empty() || enabled.iter().any(|e| e == id);
 
-    let providers: Vec<ProviderUsage> = ["claude", "codex", "glm"]
+    let providers: Vec<ProviderUsage> = PROVIDER_IDS
         .iter()
         .filter(|id| want(id))
         .filter_map(|id| {
