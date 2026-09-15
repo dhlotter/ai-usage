@@ -772,6 +772,20 @@ pub fn get_cached_providers(enabled: Vec<String>) -> ProvidersResponse {
     }
 }
 
+/// Same as `get_providers`, but drops any cached result (including a "not
+/// running" or error backoff) first. The periodic timer calls `get_providers`
+/// and respects backoff so it never hammers a provider; a manual click means
+/// "ignore that, check right now," most useful right after opening Antigravity
+/// while its language server was still mid-backoff from an earlier miss.
+#[tauri::command]
+pub fn force_refresh_providers(enabled: Vec<String>) -> ProvidersResponse {
+    let want = |id: &str| enabled.is_empty() || enabled.iter().any(|e| e == id);
+    for id in PROVIDER_IDS.iter().filter(|id| want(id)) {
+        invalidate(id);
+    }
+    get_providers(enabled)
+}
+
 /// Populate the cache at launch so the first click renders from a warm cache.
 /// Without this nothing is fetched until the webview has booted (~2.4s), and
 /// only then does the first request go out.

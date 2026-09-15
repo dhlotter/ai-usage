@@ -42,14 +42,21 @@ export default function App() {
     return () => { ro?.disconnect(); cancelAnimationFrame(raf); };
   });
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     const enabled = Object.entries(settings.enabled).filter(([, v]) => v).map(([k]) => k);
     try {
-      setData(await invoke<ProvidersResponse>('get_providers', { enabled }));
+      const cmd = force ? 'force_refresh_providers' : 'get_providers';
+      setData(await invoke<ProvidersResponse>(cmd, { enabled }));
       liveLandedRef.current = true;
     }
     catch (e) { console.error(e); }
   }, [settings.enabled]);
+
+  // Manual click means "ignore any backoff and check right now" (e.g. right
+  // after opening Antigravity while an earlier miss is still in its backoff
+  // window). The periodic timer stays on the plain path so it never hammers
+  // a provider that's genuinely down.
+  const hardRefresh = useCallback(() => refresh(true), [refresh]);
 
   // Fill the popover from the Rust-side cache until the live fetch lands.
   //
@@ -142,7 +149,7 @@ export default function App() {
       <div className="titlebar">
         <span className="titlebar-title">AI Usage</span>
         <div className="titlebar-right">
-          <button className="icon-btn" onClick={refresh} title="Refresh"><IconRefresh /></button>
+          <button className="icon-btn" onClick={hardRefresh} title="Refresh"><IconRefresh /></button>
           <button className="icon-btn" onClick={() => invoke('open_settings').catch(() => {})} title="Settings"><IconGear /></button>
         </div>
       </div>
