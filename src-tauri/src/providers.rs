@@ -363,7 +363,9 @@ fn fetch_glm() -> ProviderUsage {
 // and it only reports while the IDE is open.
 
 const AG_RPC: &str = "exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
-const AG_PROCESS: &str = "language_server_macos_arm";
+/// Covers both the IDE's bundled `language_server_macos_arm` and the Agents
+/// view's standalone `Resources/bin/language_server`, which speak the same RPC.
+const AG_PROCESS: &str = "Antigravity.app/.*language_server";
 
 /// Every (port, csrf token) pair the running language servers expose. The IDE
 /// runs more than one, and only some of their ports speak plain HTTP, so all of
