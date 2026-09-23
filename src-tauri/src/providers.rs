@@ -142,6 +142,38 @@ fn iso_to_unix(s: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(s).ok().map(|d| d.timestamp())
 }
 
+/// Claude Code only refreshes its keychain token when it runs, so a day spent
+/// in the desktop app leaves this one expired. Starting the CLI headless is
+/// enough to make it refresh and write the keychain itself; the one-word haiku
+/// turn just gives it a valid invocation. We never touch the refresh token.
+fn refresh_claude_token() {
+    static LAST_TRY: Mutex<i64> = Mutex::new(0);
+    {
+        let mut last = LAST_TRY.lock().unwrap();
+        let now = Local::now().timestamp();
+        if now - *last < 600 { return; }
+        *last = now;
+    }
+    let Some(home) = dirs::home_dir() else { return };
+    let Some(bin) = [home.join(".local/bin/claude"), "/opt/homebrew/bin/claude".into(), "/usr/local/bin/claude".into()]
+        .into_iter().find(|p| p.exists()) else { return };
+
+    let Ok(mut child) = Command::new(bin)
+        .args(["-p", "--model", "haiku", "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence", "ok"])
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn() else { return };
+    for _ in 0..60 {
+        if let Ok(Some(_)) = child.try_wait() { return; }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    let _ = child.kill();
+}
+
+fn claude_keychain() -> Option<Value> {
+    serde_json::from_str(&read_keychain("Claude Code-credentials").ok()?).ok()
+}
+
 fn fetch_claude() -> ProviderUsage {
     if let Some(c) = cached("claude") { return c; }
 
@@ -153,14 +185,13 @@ fn fetch_claude() -> ProviderUsage {
         ..Default::default()
     };
 
-    let raw = match read_keychain("Claude Code-credentials") {
-        Ok(s) => s,
-        Err(_) => { return degrade("claude", u, ERROR_BACKOFF_SECS); }
-    };
-    let kc: Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => { u.auth_state = "auth_failed".into(); u.auth_error = Some(format!("parse keychain: {e}")); return degrade("claude", u, ERROR_BACKOFF_SECS); }
-    };
+    let Some(mut kc) = claude_keychain() else { return degrade("claude", u, ERROR_BACKOFF_SECS); };
+    let expires_ms = kc["claudeAiOauth"]["expiresAt"].as_i64().unwrap_or(i64::MAX);
+    if expires_ms / 1000 < Local::now().timestamp() + 60 {
+        refresh_claude_token();
+        let Some(fresh) = claude_keychain() else { return degrade("claude", u, ERROR_BACKOFF_SECS); };
+        kc = fresh;
+    }
     let token = match kc["claudeAiOauth"]["accessToken"].as_str() {
         Some(t) => t.to_string(),
         None => { u.auth_state = "auth_failed".into(); u.auth_error = Some("no access token".into()); return degrade("claude", u, ERROR_BACKOFF_SECS); }
@@ -177,7 +208,12 @@ fn fetch_claude() -> ProviderUsage {
             Ok(v) => v,
             Err(e) => { u.auth_state = "network_error".into(); u.auth_error = Some(format!("json: {e}")); return degrade("claude", u, ERROR_BACKOFF_SECS); }
         },
-        Err(ureq::Error::Status(401, _)) => { u.auth_state = "auth_failed".into(); u.auth_error = Some("401 — run `claude` to refresh".into()); return degrade("claude", u, ERROR_BACKOFF_SECS); }
+        Err(ureq::Error::Status(401, _)) => {
+            refresh_claude_token();
+            u.auth_state = "auth_failed".into();
+            u.auth_error = Some("Token rejected. Refreshed it via the Claude CLI, retrying shortly.".into());
+            return degrade("claude", u, ERROR_BACKOFF_SECS);
+        }
         Err(ureq::Error::Status(429, r)) => {
             let retry = r.header("retry-after").and_then(|s| s.parse::<i64>().ok()).unwrap_or(RATE_LIMITED_BACKOFF_SECS);
             u.auth_state = "rate_limited".into();
