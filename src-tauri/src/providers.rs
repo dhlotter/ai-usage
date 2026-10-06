@@ -55,6 +55,7 @@ fn put_cache(id: &str, result: ProviderUsage, ttl_secs: i64) {
 fn invalidate(id: &str) {
     if let Ok(mut map) = cache().lock() { map.remove(id); }
     if let Ok(mut map) = last_good().lock() { map.remove(id); }
+    if let Ok(mut map) = auth_fails().lock() { map.remove(id); }
 }
 
 /// The most recent successful reading, kept separately from the TTL cache.
@@ -67,15 +68,32 @@ fn put_good(id: &str, result: ProviderUsage) {
     if let Ok(mut map) = last_good().lock() {
         map.insert(id.to_string(), result);
     }
+    if let Ok(mut map) = auth_fails().lock() { map.remove(id); }
 }
+
+/// Consecutive credential failures per provider since the last good reading.
+fn auth_fails() -> &'static Mutex<HashMap<String, u32>> {
+    static F: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    F.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A token mid refresh or a keychain item being rewritten fails for a moment
+/// and then works. Only a failure that repeats this many fetches in a row is
+/// worth telling the user to sign in.
+const AUTH_GRACE_FAILS: u32 = 3;
 
 /// A rate limit or a dropped connection says nothing about the numbers we
 /// already have, so keep showing the last good reading instead of replacing it
-/// with an error. Only failures the user must act on (missing or rejected
-/// credentials) are allowed to blank the card.
+/// with an error. Missing or rejected credentials blank the card only once
+/// they repeat AUTH_GRACE_FAILS fetches in a row, so a refresh in flight does
+/// not flash "sign in".
 fn degrade(id: &str, failure: ProviderUsage, backoff_secs: i64) -> ProviderUsage {
     let backoff = backoff_secs.clamp(1, MAX_BACKOFF_SECS);
-    let transient = matches!(failure.auth_state.as_str(), "rate_limited" | "network_error");
+    let mut transient = matches!(failure.auth_state.as_str(), "rate_limited" | "network_error");
+    if matches!(failure.auth_state.as_str(), "no_credentials" | "auth_failed") {
+        let streak = auth_fails().lock().map(|mut m| { let n = m.entry(id.to_string()).or_insert(0); *n += 1; *n }).unwrap_or(u32::MAX);
+        transient = streak < AUTH_GRACE_FAILS;
+    }
 
     if transient {
         if let Ok(map) = last_good().lock() {
@@ -633,13 +651,20 @@ mod tests {
     }
 
     #[test]
-    fn auth_failure_is_shown_even_with_a_good_reading() {
+    fn auth_failure_is_shown_once_it_repeats() {
         let id = "test-auth";
         put_good(id, usage(id, "ok", 42.0));
 
+        for _ in 0..AUTH_GRACE_FAILS - 1 {
+            let shown = degrade(id, usage(id, "auth_failed", 0.0), 60);
+            assert_eq!(shown.auth_state, "ok", "one blip should not say sign in");
+        }
         let shown = degrade(id, usage(id, "auth_failed", 0.0), 60);
+        assert_eq!(shown.auth_state, "auth_failed", "the user has to act on a repeating failure");
 
-        assert_eq!(shown.auth_state, "auth_failed", "the user has to act on this one");
+        put_good(id, usage(id, "ok", 42.0));
+        let shown = degrade(id, usage(id, "auth_failed", 0.0), 60);
+        assert_eq!(shown.auth_state, "ok", "a good reading resets the count");
         invalidate(id);
     }
 
