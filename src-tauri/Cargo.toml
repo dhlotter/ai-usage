@@ -1,6 +1,6 @@
 [package]
 name = "ai-usage"
-version = "0.2.2"
+version = "0.2.3"
 description = "AI coding tool usage monitor in the menubar"
 authors = ["Hermann Lotter"]
 edition = "2021"
