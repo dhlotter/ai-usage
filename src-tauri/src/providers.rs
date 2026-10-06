@@ -401,8 +401,19 @@ fn fetch_glm() -> ProviderUsage {
 const AG_RPC: &str = "exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
 /// Covers both apps: `Antigravity IDE.app` bundles `language_server_macos_arm`,
 /// the Agents view's `Antigravity.app` ships `Resources/bin/language_server`.
-/// Same RPC either way.
-const AG_PROCESS: &str = "Antigravity[^/]*\\.app/.*language_server";
+/// Same RPC either way. The `agy` CLI's hub (started by an editor extension)
+/// serves it too, with no app open.
+const AG_PROCESS: &str = "Antigravity[^/]*\\.app/.*language_server|\\.gemini/bin/agy --hub";
+
+/// The language servers pass `--csrf_token value`, the agy hub `--csrf_token=value`.
+fn csrf_token(cmd: &str) -> Option<String> {
+    let mut args = cmd.split_whitespace();
+    while let Some(a) = args.next() {
+        if a == "--csrf_token" { return args.next().map(String::from); }
+        if let Some(t) = a.strip_prefix("--csrf_token=") { return Some(t.into()); }
+    }
+    None
+}
 
 /// Every (port, csrf token) pair the running language servers expose. The IDE
 /// runs more than one, and only some of their ports speak plain HTTP, so all of
@@ -416,14 +427,7 @@ fn ag_endpoints() -> Vec<(u16, String)> {
         let Ok(out) = Command::new("/bin/ps").args(["-p", pid, "-o", "command="]).output() else { continue };
         let cmd = String::from_utf8_lossy(&out.stdout);
 
-        let mut args = cmd.split_whitespace();
-        let token = loop {
-            match args.next() {
-                Some("--csrf_token") => break args.next().map(String::from),
-                Some(_) => continue,
-                None => break None,
-            }
-        };
+        let token = csrf_token(&cmd);
         let Some(token) = token else { continue };
 
         let Ok(out) = Command::new("/usr/sbin/lsof")
@@ -667,6 +671,13 @@ mod tests {
 
         assert_eq!(w.used_percent, 0.0);
         assert_eq!(w.resets_at_unix, 0, "no countdown, rather than no window");
+    }
+
+    #[test]
+    fn csrf_token_reads_both_flag_forms() {
+        assert_eq!(csrf_token("ls --csrf_token abc --x").as_deref(), Some("abc"));
+        assert_eq!(csrf_token("agy --hub --csrf_token=abc --add-dir=/x").as_deref(), Some("abc"));
+        assert_eq!(csrf_token("agy --hub"), None);
     }
 
     /// Antigravity reports the fraction still available, the inverse of every

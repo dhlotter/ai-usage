@@ -98,7 +98,7 @@ export const PROVIDER_SETUP: Record<string, ProviderSetup> = {
     links: [{ label: 'Install Codex CLI', url: 'https://developers.openai.com/codex/cli/' }],
   },
   antigravity: {
-    how: 'Read from the running Antigravity IDE. Its quota is only available while the IDE is open, so the card goes quiet when it is closed.',
+    how: 'Read from a running Antigravity app or the agy hub that an editor extension starts. Its quota is only available while one of them is running, so the card goes quiet when none is.',
     links: [{ label: 'About Antigravity', url: 'https://antigravity.google/' }],
   },
   glm: {
