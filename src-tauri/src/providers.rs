@@ -263,6 +263,21 @@ fn fetch_claude() -> ProviderUsage {
 
 const CODEX_USAGE: &str = "https://chatgpt.com/backend-api/wham/usage";
 
+/// "5 hour", "Weekly", or whole days/hours for anything else.
+fn window_label(secs: i64) -> String {
+    match secs {
+        18_000 => "5 hour".into(),
+        604_800 => "Weekly".into(),
+        s if s % 86_400 == 0 => format!("{} day", s / 86_400),
+        s => format!("{} hour", (s + 1_800) / 3_600),
+    }
+}
+
+/// `self_serve_business_prolite` reads as "business prolite".
+fn codex_plan_name(raw: &str) -> String {
+    raw.trim_start_matches("self_serve_").replace('_', " ")
+}
+
 fn fetch_codex() -> ProviderUsage {
     if let Some(c) = cached("codex") { return c; }
 
@@ -312,16 +327,18 @@ fn fetch_codex() -> ProviderUsage {
     };
 
     u.auth_state = "ok".into();
-    u.plan_type = body["plan_type"].as_str().map(String::from);
+    u.plan_type = body["plan_type"].as_str().map(codex_plan_name);
 
+    // The window length varies by plan: older plans send a 5 hour primary and a
+    // weekly secondary, the business prolite plan sends a single weekly one as
+    // primary. So the label comes from the reported length, not the slot.
     let rl = &body["rate_limit"];
-    if let Some(pct) = rl["primary_window"]["used_percent"].as_f64() {
-        u.windows.push(UsageWindow::new("5 hour", pct,
-            rl["primary_window"]["reset_at"].as_i64().unwrap_or(0)));
-    }
-    if let Some(pct) = rl["secondary_window"]["used_percent"].as_f64() {
-        u.windows.push(UsageWindow::new("Weekly", pct,
-            rl["secondary_window"]["reset_at"].as_i64().unwrap_or(0)));
+    for (slot, fallback) in [("primary_window", "5 hour"), ("secondary_window", "Weekly")] {
+        let w = &rl[slot];
+        if let Some(pct) = w["used_percent"].as_f64() {
+            let label = w["limit_window_seconds"].as_i64().map(window_label).unwrap_or_else(|| fallback.into());
+            u.windows.push(UsageWindow::new(&label, pct, w["reset_at"].as_i64().unwrap_or(0)));
+        }
     }
     put_good("codex", u.clone());
     put_cache("codex", u.clone(), MIN_FETCH_INTERVAL_SECS);
@@ -696,6 +713,15 @@ mod tests {
 
         assert_eq!(w.used_percent, 0.0);
         assert_eq!(w.resets_at_unix, 0, "no countdown, rather than no window");
+    }
+
+    #[test]
+    fn codex_windows_are_labelled_by_length_not_slot() {
+        assert_eq!(window_label(18_000), "5 hour");
+        assert_eq!(window_label(604_800), "Weekly");
+        assert_eq!(window_label(172_800), "2 day");
+        assert_eq!(codex_plan_name("self_serve_business_prolite"), "business prolite");
+        assert_eq!(codex_plan_name("plus"), "plus");
     }
 
     #[test]
