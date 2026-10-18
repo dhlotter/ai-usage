@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Local gate. Runs the checks CI would run, before a push leaves the machine.
+# Called by the global git pre-push hook (agent-config/harness/git/hooks/pre-push). PREPUSH_SKIP=1 bypasses.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+npx tsc --noEmit
+(cd src-tauri && cargo test)
